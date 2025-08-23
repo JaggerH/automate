@@ -1,0 +1,25 @@
+proxy:
+  listen:
+    host: "127.0.0.1"
+    port: 8080
+    backup_ports: [8081, 8082, 8083]
+  
+  upstream:
+    enabled: true
+    clash_detection:
+      hosts: ["127.0.0.1"]
+      ports: [7897, 7898, 7899, 7890, 7891]
+      protocols: ["http", "socks5"]
+    
+    fallback:
+      direct_connection: true
+      retry_interval: 30
+      
+  performance:
+    timeout: 10
+    max_concurrent: 200
+    keep_alive: true
+    
+  ssl:
+    cert_dir: "temp_certs"
+    auto_generate: true

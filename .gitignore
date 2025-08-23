@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+
+# 数据文件
+data/
+!data/.gitkeep
+*.csv
+*.db
+
+# 输出文件
+outputs/
+*.json
+
+# 临时文件
+temp_certs/
+*.tmp
+*.log
+
+# 配置文件中的敏感信息
+config/local_*.yaml
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 证书和密钥
+*.pem
+*.key
+*.crt

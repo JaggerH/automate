@@ -1,0 +1,30 @@
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  
+  handlers:
+    console:
+      enabled: true
+      level: "INFO"
+      
+    file:
+      enabled: true
+      level: "INFO"
+      file: "data/logs/automate.log"
+      max_size: "10MB"
+      backup_count: 5
+      
+    error_file:
+      enabled: true
+      level: "ERROR"
+      file: "data/logs/error.log"
+      max_size: "5MB"
+      backup_count: 3
+      
+  loggers:
+    mitmproxy:
+      level: "WARNING"  # 减少mitmproxy的日志输出
+    urllib3:
+      level: "WARNING"
+    requests:
+      level: "WARNING"

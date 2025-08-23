@@ -1,0 +1,6 @@
+mitmproxy==10.2.2
+requests==2.31.0
+PyYAML==6.0.1
+psutil==5.9.6
+colorama==0.4.6
+rich==13.7.0

@@ -1,0 +1,39 @@
+services:
+  netease:
+    name: "网易云音乐"
+    enabled: true
+    domains:
+      - "music.163.com"
+      - "interface.music.163.com"
+      - "interface3.music.163.com"
+      - "api.music.163.com"
+      - "mam.netease.com"
+      - "clientlog.music.163.com"
+      - "httpdns.n.netease.com"
+      - "163.com"  # 添加顶级域名
+    extract_interval: 300  # 减少到5分钟方便测试
+    output_file: "../music-sync/config/auto_cookie.json"
+    cookie_format: "netease_auth"
+    
+  quark:
+    name: "夸克网盘"
+    enabled: true
+    domains:
+      - "pan.quark.cn" 
+      - "drive-pc.quark.cn"
+      - "drive-h.quark.cn"
+    extract_interval: 7200
+    output_file: "data/outputs/quark_cookie.json"
+    cookie_format: "standard"
+    
+  # 示例：可以轻松添加新服务
+  # bilibili:
+  #   name: "哔哩哔哩"
+  #   enabled: false
+  #   domains:
+  #     - "bilibili.com"
+  #     - "api.bilibili.com"
+  #     - "passport.bilibili.com"
+  #   extract_interval: 3600  # 1小时
+  #   output_file: "data/outputs/bilibili_cookie.json"
+  #   cookie_format: "standard"
