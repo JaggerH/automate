@@ -10,21 +10,33 @@ services:
       - "mam.netease.com"
       - "clientlog.music.163.com"
       - "httpdns.n.netease.com"
-      - "163.com"  # 添加顶级域名
-    extract_interval: 300  # 减少到5分钟方便测试
-    output_file: "../music-sync/config/auto_cookie.json"
-    cookie_format: "netease_auth"
-    
+      - "163.com"
+    features:
+      extract_cookie:
+        enabled: true
+        interval: 300  # 5分钟
+        output_file: "data/outputs/netease/cookie.json"
+        format: "netease_auth"
+      extract_playlist:
+        enabled: true
+        target_ids:
+          - "9951570527"  # 可配置多个目标播放列表ID
+        output_dir: "data/outputs/netease/playlists"
+        save_format: "json"
+        
   quark:
     name: "夸克网盘"
     enabled: true
     domains:
-      - "pan.quark.cn" 
+      - "pan.quark.cn"
       - "drive-pc.quark.cn"
       - "drive-h.quark.cn"
-    extract_interval: 7200
-    output_file: "data/outputs/quark_cookie.json"
-    cookie_format: "standard"
+    features:
+      extract_cookie:
+        enabled: true
+        interval: 7200  # 2小时
+        output_file: "data/outputs/quark/cookie.json"
+        format: "standard"
     
   # 示例：可以轻松添加新服务
   # bilibili:
