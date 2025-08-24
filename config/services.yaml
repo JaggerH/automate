@@ -14,7 +14,7 @@ services:
     features:
       extract_cookie:
         enabled: true
-        interval: 300  # 5分钟
+        interval: 3600  # 1 Hour
         output_file: "data/outputs/netease/cookie.json"
         format: "netease_auth"
       extract_playlist:

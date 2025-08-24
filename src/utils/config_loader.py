@@ -1,7 +1,10 @@
 import yaml
 import os
+import logging
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, List
+
+logger = logging.getLogger(__name__)
 
 class ConfigLoader:
     def __init__(self, config_dir: str = "config"):
@@ -47,7 +50,56 @@ class ConfigLoader:
     def get_enabled_services(self) -> Dict[str, Dict]:
         """获取启用的服务列表"""
         services = self.get_services_config()['services']
-        return {name: config for name, config in services.items() if config.get('enabled', True)}
+        enabled_services = {name: config for name, config in services.items() if config.get('enabled', True)}
+        
+        # 验证启用的服务配置
+        for service_name, service_config in enabled_services.items():
+            self._validate_service_config(service_name, service_config)
+        
+        return enabled_services
+    
+    def _validate_service_config(self, service_name: str, config: Dict[str, Any]):
+        """验证单个服务配置"""
+        required_fields = ['name', 'domains']
+        missing_fields = []
+        
+        for field in required_fields:
+            if field not in config:
+                missing_fields.append(field)
+        
+        if missing_fields:
+            raise ValueError(f"服务 {service_name} 缺少必需字段: {missing_fields}")
+        
+        # 验证domains不为空
+        if not config['domains'] or not isinstance(config['domains'], list):
+            raise ValueError(f"服务 {service_name} 的domains必须是非空列表")
+        
+        # 验证features配置
+        features = config.get('features', {})
+        
+        # 验证cookie提取配置
+        if features.get('extract_cookie', {}).get('enabled'):
+            cookie_config = features['extract_cookie']
+            if not cookie_config.get('output_file'):
+                raise ValueError(f"服务 {service_name} 启用了cookie提取但未指定output_file")
+            
+            # 验证interval是数字且大于0
+            interval = cookie_config.get('interval', 300)
+            if not isinstance(interval, (int, float)) or interval <= 0:
+                raise ValueError(f"服务 {service_name} 的cookie提取间隔必须是大于0的数字")
+        
+        # 验证播放列表提取配置
+        if features.get('extract_playlist', {}).get('enabled'):
+            playlist_config = features['extract_playlist']
+            if not playlist_config.get('output_dir'):
+                raise ValueError(f"服务 {service_name} 启用了播放列表提取但未指定output_dir")
+            
+            # 验证target_ids存在且不为空
+            target_ids = playlist_config.get('target_ids')
+            if not target_ids or not isinstance(target_ids, list):
+                raise ValueError(f"服务 {service_name} 启用了播放列表提取但target_ids为空或非列表")
+        
+        logger.debug(f"服务 {service_name} 配置验证通过")
 
 # 全局配置加载器实例
 config_loader = ConfigLoader()

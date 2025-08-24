@@ -11,6 +11,7 @@ import sys
 import os
 import psutil
 import time
+import logging
 from pathlib import Path
 from typing import List, Dict, Optional
 
@@ -23,6 +24,9 @@ from src.core.csv_manager import CSVStatusManager
 from src.extractors.netease_extractor import NeteaseExtractor
 from src.extractors.quark_extractor import QuarkExtractor
 
+# 设置日志
+logger = logging.getLogger(__name__)
+
 class ProcessInject:
     """进程注入模式提取器"""
     
@@ -34,19 +38,19 @@ class ProcessInject:
         self.request_count = 0
         self.extract_count = 0
         
-        # 目标进程映射
-        self.target_processes = {
-            'netease': ['cloudmusic.exe', 'CloudMusic.exe'],
-            'quark': ['QuarkCloudDrive.exe', 'quark.exe']
-        }
+        # 目标进程映射 - 将从配置加载
+        self.target_processes = {}
     
     def load(self, loader):
         """mitmproxy加载时初始化"""
         try:
-            print("初始化进程注入提取器...")
+            logger.info("初始化进程注入提取器...")
             
             # 加载服务配置
             self.services_config = config_loader.get_enabled_services()
+            
+            # 从配置加载进程映射
+            self._load_process_config()
             
             # 初始化CSV管理器
             self.csv_manager = CSVStatusManager()
@@ -57,10 +61,13 @@ class ProcessInject:
             # 开始会话
             self.csv_manager.start_session(self.session_id, "PID_Injection")
             
-            print(f"已加载服务: {list(self.services_config.keys())}")
+            logger.info(f"已加载服务: {list(self.services_config.keys())}")
             
+        except (ImportError, AttributeError) as e:
+            logger.error(f"配置加载失败: {e}")
+            raise
         except Exception as e:
-            print(f"初始化失败: {e}")
+            logger.exception("初始化过程中发生未知错误")
             raise
     
     def _init_extractors(self):
@@ -71,7 +78,24 @@ class ProcessInject:
             elif service_name == 'quark':
                 self.extractors[service_name] = QuarkExtractor(service_config)
             
-            print(f"已初始化 {service_name} 提取器")
+            logger.info(f"已初始化 {service_name} 提取器")
+    
+    def _load_process_config(self):
+        """从配置加载进程映射"""
+        # 默认进程映射
+        default_processes = {
+            'netease': ['cloudmusic.exe', 'CloudMusic.exe'],
+            'quark': ['QuarkCloudDrive.exe', 'quark.exe']
+        }
+        
+        # 从服务配置中加载进程名 (如果存在)
+        for service_name, service_config in self.services_config.items():
+            process_names = service_config.get('process_names', default_processes.get(service_name, []))
+            if process_names:
+                self.target_processes[service_name] = process_names
+                logger.debug(f"加载 {service_name} 进程映射: {process_names}")
+            else:
+                logger.warning(f"服务 {service_name} 未配置进程名，将无法进行进程检测")
     
     def detect_processes(self, service: str) -> List[int]:
         """检测指定服务的目标进程"""
@@ -118,8 +142,10 @@ class ProcessInject:
         # 委托给提取器处理
         try:
             extractor.handle_request(flow)
+        except (AttributeError, KeyError) as e:
+            logger.error(f"处理请求时出错 ({target_service}): {e}")
         except Exception as e:
-            print(f"处理请求时出错 ({target_service}): {e}")
+            logger.exception(f"处理请求时发生未知错误 ({target_service})")
     
     def response(self, flow):
         """处理HTTP响应"""
@@ -138,9 +164,11 @@ class ProcessInject:
             result = extractor.handle_response(flow)
             if result:
                 self.extract_count += 1
-                print(f"成功提取 {target_service} 数据")
+                logger.info(f"成功提取 {target_service} 数据")
+        except (AttributeError, KeyError) as e:
+            logger.error(f"处理响应时出错 ({target_service}): {e}")
         except Exception as e:
-            print(f"处理响应时出错 ({target_service}): {e}")
+            logger.exception(f"处理响应时发生未知错误 ({target_service})")
     
     def _identify_service(self, host: str) -> Optional[str]:
         """识别主机属于哪个服务"""
@@ -151,14 +179,25 @@ class ProcessInject:
         return None
     
     def done(self):
-        """代理关闭时的统计"""
-        if self.csv_manager:
-            self.csv_manager.end_session(self.session_id, self.extract_count)
-        
-        print(f"\n进程注入会话结束")
-        print(f"总请求: {self.request_count}")
-        print(f"成功提取: {self.extract_count}")
-        print("=" * 60)
+        """代理关闭时的统计和资源清理"""
+        try:
+            # 清理所有提取器资源
+            for service_name, extractor in self.extractors.items():
+                if hasattr(extractor, 'cleanup'):
+                    extractor.cleanup()
+                    logger.debug(f"已清理 {service_name} 提取器资源")
+            
+            # 会话统计
+            if self.csv_manager:
+                self.csv_manager.end_session(self.session_id, self.extract_count)
+            
+            logger.info("进程注入会话结束")
+            logger.info(f"总请求: {self.request_count}")
+            logger.info(f"成功提取: {self.extract_count}")
+            print("=" * 60)  # 保留分隔符便于用户识别会话结束
+            
+        except Exception as e:
+            logger.error(f"会话清理时出错: {e}")
 
 # mitmproxy插件入口
 addons = [ProcessInject()]
