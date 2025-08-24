@@ -3,6 +3,7 @@ import json
 import time
 import os
 import logging
+from datetime import datetime
 from pathlib import Path
 from .base_extractor import BaseExtractor
 
@@ -88,7 +89,7 @@ class NeteaseExtractor(BaseExtractor):
         if not cleaned_cookies:
             return None
         
-        print(f"网易云Cookie提取成功: {self.get_cookie_preview(cleaned_cookies)} (来源: {source})")
+        logger.info(f"网易云Cookie提取成功: {self.get_cookie_preview(cleaned_cookies)} (来源: {source})")
         
         return cleaned_cookies
     

@@ -19,8 +19,7 @@ services:
         format: "netease_auth"
       extract_playlist:
         enabled: true
-        target_ids:
-          - "9951570527"  # 可配置多个目标播放列表ID
+        target_ids: ["9951570527", "60567077"]  # 可配置多个目标播放列表ID
         output_dir: "data/outputs/netease/playlists"
         save_format: "json"
         

@@ -172,7 +172,7 @@ def start_daemon_mode(silent_mode=False):
     
     # 创建并启动监控器
     target_processes = get_target_processes_config()
-    monitor = ProcessMonitor(target_processes, check_interval=5)
+    monitor = ProcessMonitor(target_processes, check_interval=10)
     monitor.set_silent_mode(silent_mode)
     
     try:

@@ -8,6 +8,7 @@ import time
 import logging
 import subprocess
 import threading
+import os
 from typing import Dict, List, Set, Optional
 from pathlib import Path
 
@@ -16,11 +17,12 @@ logger = logging.getLogger(__name__)
 class ProcessMonitor:
     """进程监控器 - 监控目标进程并自动注入"""
     
-    def __init__(self, target_processes: Dict[str, List[str]], check_interval: int = 5):
+    def __init__(self, target_processes: Dict[str, List[str]], check_interval: int = 10):
         self.target_processes = target_processes
         self.check_interval = check_interval
         self.running = False
         self.current_pids = set()
+        self.current_processes = {}  # 记录当前进程信息 {pid: process_name}
         self.mitm_process = None
         self.monitor_thread = None
         
@@ -31,21 +33,23 @@ class ProcessMonitor:
         """设置静默模式"""
         self.silent_mode = silent
         
-    def get_all_target_pids(self) -> Set[int]:
-        """获取所有目标进程的PID"""
+    def get_all_target_pids(self) -> tuple[Set[int], Dict[int, str]]:
+        """获取所有目标进程的PID和进程信息"""
         found_pids = set()
+        process_info = {}  # {pid: process_name}
         
         for service, process_names in self.target_processes.items():
             for proc in psutil.process_iter(['pid', 'name']):
                 try:
                     if proc.info['name'] in process_names:
-                        found_pids.add(proc.info['pid'])
-                        if not self.silent_mode:
-                            logger.info(f"发现目标进程: {proc.info['name']} (PID: {proc.info['pid']})")
+                        pid = proc.info['pid']
+                        name = proc.info['name']
+                        found_pids.add(pid)
+                        process_info[pid] = name
                 except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                     continue
         
-        return found_pids
+        return found_pids, process_info
     
     def start_mitm_injection(self, pids: Set[int]) -> bool:
         """启动mitmproxy进程注入"""
@@ -59,29 +63,43 @@ class ProcessMonitor:
                 "mitmdump",
                 "-s", "src/core/process_inject.py",
                 "--mode", f"local:{pid_list}",
-                "--set", "confdir=temp_certs"
+                "--set", "confdir=temp_certs",
+                "--quiet"  # 总是使用quiet模式减少日志输出
             ]
             
+            # 静默模式下完全禁用输出
             if self.silent_mode:
-                cmd.append("--quiet")
+                cmd.extend([
+                    "--set", "stream_large_bodies=1",
+                    "--set", "connection_strategy=lazy"
+                ])
             
             if not self.silent_mode:
                 logger.info(f"启动进程注入: PID={pid_list}")
-                logger.info(f"命令: {' '.join(cmd)}")
             
             # 启动mitmproxy进程
+            # 配置环境变量和日志
+            env = os.environ.copy()
+            env['AUTOMATE_DAEMON_MODE'] = 'true'  # 告知process_inject这是守护模式
+            
+            # 配置子进程的日志级别
+            if not self.silent_mode:
+                env['PYTHON_LOG_LEVEL'] = 'INFO'
+            else:
+                env['PYTHON_LOG_LEVEL'] = 'WARNING'
+            
+            # 让子进程继承父进程的stderr，这样logger能正常输出
             self.mitm_process = subprocess.Popen(
                 cmd,
-                stdout=subprocess.DEVNULL if self.silent_mode else None,
-                stderr=subprocess.DEVNULL if self.silent_mode else None
+                stdout=subprocess.DEVNULL,  # 只屏蔽mitmproxy的stdout冗余日志  
+                stderr=None,  # 继承父进程stderr，让logger正常输出
+                env=env
             )
             
             # 等待一小段时间确保启动成功
             time.sleep(2)
             
             if self.mitm_process.poll() is None:
-                if not self.silent_mode:
-                    logger.info("mitmproxy进程注入启动成功")
                 return True
             else:
                 logger.error("mitmproxy进程启动失败")
@@ -104,13 +122,32 @@ class ProcessMonitor:
                     self.mitm_process.kill()
                     self.mitm_process.wait()
                 
-                if not self.silent_mode:
-                    logger.info("mitmproxy进程注入已停止")
+                pass  # 静默停止，不输出日志
                     
             except Exception as e:
                 logger.error(f"停止mitmproxy进程失败: {e}")
             finally:
                 self.mitm_process = None
+    
+    def _get_process_names_summary(self, process_info: Dict[int, str]) -> str:
+        """获取进程名称摘要（合并重复名称）"""
+        if not process_info:
+            return "无"
+        
+        # 统计每个进程名的数量
+        name_counts = {}
+        for name in process_info.values():
+            name_counts[name] = name_counts.get(name, 0) + 1
+        
+        # 格式化输出
+        parts = []
+        for name, count in name_counts.items():
+            if count > 1:
+                parts.append(f"{name}({count}个)")
+            else:
+                parts.append(name)
+        
+        return ", ".join(parts)
     
     def _monitor_loop(self):
         """监控循环"""
@@ -118,13 +155,26 @@ class ProcessMonitor:
         
         while self.running:
             try:
-                # 获取当前所有目标进程PID
-                current_pids = self.get_all_target_pids()
+                # 获取当前所有目标进程PID和进程信息
+                current_pids, current_process_info = self.get_all_target_pids()
                 
-                # 检查进程变化
+                # 检查PIDs是否发生变化
                 if current_pids != self.current_pids:
-                    if not self.silent_mode:
-                        logger.info(f"进程状态变化: {len(self.current_pids)} -> {len(current_pids)}")
+                    # 分析变化
+                    new_pids = current_pids - self.current_pids
+                    closed_pids = self.current_pids - current_pids
+                    
+                    # 处理进程关闭
+                    if closed_pids:
+                        closed_names = [self.current_processes.get(pid, "未知") for pid in closed_pids]
+                        closed_summary = self._get_process_names_summary({pid: name for pid, name in zip(closed_pids, closed_names)})
+                        logger.info(f"程序关闭: {closed_summary}")
+                    
+                    # 处理新进程
+                    if new_pids:
+                        new_process_info = {pid: current_process_info[pid] for pid in new_pids}
+                        new_summary = self._get_process_names_summary(new_process_info)
+                        logger.info(f"检测到新程序: {new_summary}")
                     
                     # 停止旧的注入
                     if self.mitm_process:
@@ -135,19 +185,28 @@ class ProcessMonitor:
                         success = self.start_mitm_injection(current_pids)
                         if success:
                             self.current_pids = current_pids
+                            self.current_processes = current_process_info
+                            if not self.silent_mode:
+                                process_summary = self._get_process_names_summary(current_process_info)
+                                logger.info(f"已注入进程: {process_summary}")
                         else:
                             self.current_pids = set()
+                            self.current_processes = {}
                     else:
                         self.current_pids = set()
-                        if not self.silent_mode:
-                            logger.info("无目标进程，等待进程启动...")
+                        self.current_processes = {}
+                        # 只在从有进程变为无进程时提示
+                        if closed_pids:
+                            logger.info("等待目标进程启动...")
                 
-                # 检查mitmproxy进程是否异常退出
+                # 检查mitmproxy进程是否异常退出（PIDs没变但mitmproxy退出了）
                 elif self.mitm_process and self.mitm_process.poll() is not None:
                     logger.warning("检测到mitmproxy进程异常退出，尝试重启")
                     self.mitm_process = None
                     if current_pids:
                         self.start_mitm_injection(current_pids)
+                
+                # PIDs没有变化时完全静默，不输出任何信息
                 
                 time.sleep(self.check_interval)
                 
