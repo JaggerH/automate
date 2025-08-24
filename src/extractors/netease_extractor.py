@@ -384,12 +384,16 @@ class NeteaseExtractor(BaseExtractor):
                 logger.debug("未检测到用户ID，使用默认Cookie文件")
             
             # 原子写入：先写临时文件再重命名
-            temp_file = final_path.with_suffix('.tmp')
+            import uuid
+            temp_suffix = f'.tmp_{uuid.uuid4().hex[:8]}'
+            temp_file = final_path.with_suffix(temp_suffix)
             
             with open(temp_file, 'w', encoding='utf-8') as f:
                 json.dump(formatted_data, f, ensure_ascii=False, indent=2)
             
-            # 原子操作：重命名临时文件
+            # 原子操作：重命名临时文件（Windows需要先删除目标文件）
+            if final_path.exists():
+                final_path.unlink()
             temp_file.rename(final_path)
             
             logger.info(f"Cookie已保存到: {final_path}")
@@ -397,7 +401,7 @@ class NeteaseExtractor(BaseExtractor):
         except (IOError, OSError) as e:
             logger.error(f"保存Cookie文件失败: {e}")
             # 清理临时文件
-            if 'temp_file' in locals():
+            if 'temp_file' in locals() and temp_file.exists():
                 temp_file.unlink(missing_ok=True)
         except Exception as e:
             logger.exception("Cookie保存过程中发生未知错误")
@@ -414,9 +418,15 @@ class NeteaseExtractor(BaseExtractor):
             output_file = output_dir / f"playlist_{playlist_id}.json"
             
             # 原子写入：保存完整数据
-            temp_file = output_file.with_suffix('.tmp')
+            import uuid
+            temp_suffix = f'.tmp_{uuid.uuid4().hex[:8]}'
+            temp_file = output_file.with_suffix(temp_suffix)
             with open(temp_file, 'w', encoding='utf-8') as f:
                 json.dump(playlist_data, f, ensure_ascii=False, indent=2)
+            
+            # Windows原子重命名
+            if output_file.exists():
+                output_file.unlink()
             temp_file.rename(output_file)
             
             logger.info(f"播放列表已保存到: {output_file}")
@@ -431,9 +441,8 @@ class NeteaseExtractor(BaseExtractor):
     def _cleanup_temp_files(self, output_dir: Path, playlist_id: str):
         """清理临时文件"""
         try:
-            # 清理可能存在的临时文件
-            temp_file = output_dir / f"playlist_{playlist_id}.tmp"
-            if temp_file.exists():
+            # 清理可能存在的临时文件（包括UUID后缀的）
+            for temp_file in output_dir.glob(f"playlist_{playlist_id}.tmp*"):
                 temp_file.unlink(missing_ok=True)
         except Exception as e:
             logger.debug(f"清理临时文件时出错: {e}")

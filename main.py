@@ -14,6 +14,8 @@ import argparse
 import os
 import subprocess
 import psutil
+import logging
+import signal
 from pathlib import Path
 from typing import List, Dict
 
@@ -28,13 +30,31 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from src.core.csv_manager import CSVStatusManager
 from src.utils.config_loader import config_loader
+from src.utils.process_monitor import ProcessMonitor
 
-def get_service_processes() -> Dict[str, List[int]]:
-    """检测所有目标服务进程"""
-    target_processes = {
+# 配置日志
+def setup_logging(silent_mode=False):
+    """设置日志配置"""
+    level = logging.WARNING if silent_mode else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%H:%M:%S'
+    )
+
+# 全局监控器实例
+monitor = None
+
+def get_target_processes_config() -> Dict[str, List[str]]:
+    """获取目标进程配置"""
+    return {
         'netease': ['cloudmusic.exe', 'CloudMusic.exe'],
         'quark': ['QuarkCloudDrive.exe', 'quark.exe']
     }
+
+def get_service_processes() -> Dict[str, List[int]]:
+    """检测所有目标服务进程"""
+    target_processes = get_target_processes_config()
     
     found_processes = {}
     
@@ -51,6 +71,14 @@ def get_service_processes() -> Dict[str, List[int]]:
             found_processes[service] = pids
     
     return found_processes
+
+def signal_handler(signum, frame):
+    """信号处理器"""
+    global monitor
+    print(f"\n收到信号 {signum}，正在停止...")
+    if monitor:
+        monitor.stop()
+    sys.exit(0)
 
 def start_process_injection():
     """启动进程注入提取器"""
@@ -117,6 +145,61 @@ def start_process_injection():
     except Exception as e:
         print(f"启动失败: {e}")
         return 1
+    
+    return 0
+
+def start_daemon_mode(silent_mode=False):
+    """启动守护模式 - 持续监控进程"""
+    global monitor
+    
+    setup_logging(silent_mode)
+    
+    project_root = Path(__file__).parent
+    os.chdir(project_root)
+    
+    if not silent_mode:
+        print("Process Injection Daemon Mode")
+        print("=" * 60)
+        print("守护模式启动 - 持续监控目标进程")
+        print("当检测到目标进程时自动启动注入")
+        print("当目标进程关闭时自动停止注入")
+        print("按 Ctrl+C 停止守护进程")
+        print("=" * 60)
+    
+    # 注册信号处理器
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    # 创建并启动监控器
+    target_processes = get_target_processes_config()
+    monitor = ProcessMonitor(target_processes, check_interval=5)
+    monitor.set_silent_mode(silent_mode)
+    
+    try:
+        monitor.start()
+        
+        if not silent_mode:
+            print("守护进程已启动，开始监控...")
+        
+        # 主线程等待
+        while monitor.is_running():
+            try:
+                import time
+                time.sleep(1)
+            except KeyboardInterrupt:
+                break
+        
+    except KeyboardInterrupt:
+        if not silent_mode:
+            print("\n接收到停止信号")
+    except Exception as e:
+        logging.error(f"守护模式出错: {e}")
+        return 1
+    finally:
+        if monitor:
+            monitor.stop()
+        if not silent_mode:
+            print("守护进程已停止")
     
     return 0
 
@@ -190,7 +273,9 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  python main.py              启动进程注入提取器
+  python main.py              启动进程注入提取器（一次性模式）
+  python main.py --daemon     启动守护模式，持续监控进程
+  python main.py --daemon --silent   静默守护模式
   python main.py --status     查看状态信息
   python main.py --cleanup    清理7天前的旧数据
         """
@@ -209,9 +294,21 @@ def main():
     )
     
     parser.add_argument(
+        '--daemon',
+        action='store_true',
+        help='启动守护模式 - 持续监控进程并自动注入'
+    )
+    
+    parser.add_argument(
+        '--silent',
+        action='store_true',
+        help='静默模式 - 减少输出信息'
+    )
+    
+    parser.add_argument(
         '--version',
         action='version',
-        version='Automate v2.0.0 - Process Injection'
+        version='Automate v2.1.0 - Process Injection with Daemon Mode'
     )
     
     args = parser.parse_args()
@@ -220,8 +317,13 @@ def main():
         show_status()
     elif args.cleanup:
         cleanup_data()
+    elif args.daemon:
+        # 守护模式
+        sys.exit(start_daemon_mode(silent_mode=args.silent))
     else:
-        # 默认启动进程注入提取器
+        # 默认启动进程注入提取器（一次性模式）
+        if args.silent:
+            setup_logging(silent_mode=True)
         sys.exit(start_process_injection())
 
 if __name__ == "__main__":

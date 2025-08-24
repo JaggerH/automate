@@ -23,14 +23,24 @@ install_https_deps.bat
 
 ### Running the Application
 ```bash
-# Start the proxy service (primary command)
+# Start process injection (one-time mode)
 python main.py
+
+# Start daemon mode - continuous process monitoring
+python main.py --daemon
+
+# Start daemon mode with silent output
+python main.py --daemon --silent
 
 # Show status and statistics
 python main.py --status
 
 # Clean up old session data (>7 days)
 python main.py --cleanup
+
+# Windows batch file helpers
+start_daemon.bat          # Start daemon mode with UI
+start_daemon_silent.bat   # Start daemon mode silently
 
 # Debug mode with verbose cookie logging
 start_debug.bat
