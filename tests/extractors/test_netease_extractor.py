@@ -244,10 +244,10 @@ class TestNeteaseExtractor(unittest.TestCase):
         print("\n=== 第1步：处理播放列表响应 ===")
         playlist_result = extractor._extract_playlist_from_response(playlist_flow)
         self.assertIsNotNone(playlist_result, "播放列表响应提取结果不应为空")
-        self.assertIn("60567077", extractor.playlist_track_ids, "应该保存播放列表的trackIds")
-        self.assertIn("60567077", extractor.pending_playlists, "应该保存等待合并的播放列表数据")
-        print(f"SUCCESS: 播放列表trackIds已保存，共{len(extractor.playlist_track_ids['60567077'])}个ID")
-        playlist_ids = extractor.playlist_track_ids['60567077'][:5]  # 前5个ID用于调试
+        self.assertIn("60567077", extractor.playlist_state.track_ids_cache, "应该保存播放列表的trackIds")
+        self.assertIn("60567077", extractor.playlist_state.pending_data, "应该保存等待合并的播放列表数据")
+        print(f"SUCCESS: 播放列表trackIds已保存，共{len(extractor.playlist_state.track_ids_cache['60567077'])}个ID")
+        playlist_ids = extractor.playlist_state.track_ids_cache['60567077'][:5]  # 前5个ID用于调试
         print(f"         前5个playlist trackIDs: {playlist_ids}")
         
         # 第2步：处理songs响应（V4分步模式 - 合并）
@@ -285,8 +285,8 @@ class TestNeteaseExtractor(unittest.TestCase):
             print("INFO: songs数据处理完成，等待进一步处理")
             
         # 验证清理状态
-        print(f"待合并状态: pending_playlists有{len(extractor.pending_playlists)}项")
-        print(f"trackIds状态: playlist_track_ids有{len(extractor.playlist_track_ids)}项")
+        print(f"待合并状态: pending_data有{len(extractor.playlist_state.pending_data)}项")
+        print(f"trackIds状态: track_ids_cache有{len(extractor.playlist_state.track_ids_cache)}项")
         
         # 验证文件输出
         print("\n=== 验证文件输出 ===")
