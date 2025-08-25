@@ -290,23 +290,47 @@ class TestNeteaseExtractor(unittest.TestCase):
         
         # 验证文件输出
         print("\n=== 验证文件输出 ===")
-        expected_output_file = project_root / 'tests' / 'extractors' / 'outputs' / 'playlists' / 'playlist_60567077.json'
-        if expected_output_file.exists():
-            with open(expected_output_file, 'r', encoding='utf-8') as f:
-                saved_data = json.load(f)
-            saved_tracks = saved_data.get('playlist', {}).get('tracks', [])
-            print(f"SUCCESS: 文件已输出到 {expected_output_file}")
-            print(f"         包含{len(saved_tracks)}首歌曲")
-            
-            # 验证数据完整性
-            if len(saved_tracks) > 0:
-                first_track = saved_tracks[0]
-                print(f"         第一首歌: {first_track.get('name', 'N/A')} (ID: {first_track.get('id', 'N/A')})")
-            
-            self.assertGreater(len(saved_tracks), 0, "保存的播放列表应该包含歌曲")
-        else:
-            print(f"WARN: 未找到输出文件 {expected_output_file}")
-            print("      可能是V4模式未完成合并，或者保存路径不正确")
+        
+        # 从配置中获取实际的输出目录
+        playlist_config = extractor.playlist_config
+        output_dir = Path(playlist_config.get('output_dir', ''))
+        playlist_id = "60567077"
+        expected_output_file = output_dir / f"playlist_{playlist_id}.json"
+        
+        print(f"配置的输出目录: {output_dir}")
+        print(f"预期输出文件: {expected_output_file}")
+        
+        # 验证输出目录存在
+        self.assertTrue(output_dir.exists(), f"输出目录应该存在: {output_dir}")
+        print(f"SUCCESS: 输出目录存在")
+        
+        # 验证输出文件存在
+        self.assertTrue(expected_output_file.exists(), f"播放列表文件应该存在: {expected_output_file}")
+        print(f"SUCCESS: 播放列表文件存在")
+        
+        # 验证文件内容
+        with open(expected_output_file, 'r', encoding='utf-8') as f:
+            saved_data = json.load(f)
+        
+        self.assertIn('playlist', saved_data, "文件应该包含playlist数据")
+        
+        saved_tracks = saved_data.get('playlist', {}).get('tracks', [])
+        saved_playlist_id = str(saved_data.get('playlist', {}).get('id', ''))
+        saved_name = saved_data.get('playlist', {}).get('name', 'N/A')
+        
+        print(f"SUCCESS: 文件内容验证通过")
+        print(f"         播放列表: {saved_name} (ID: {saved_playlist_id})")
+        print(f"         包含{len(saved_tracks)}首歌曲")
+        
+        # 验证数据完整性
+        self.assertEqual(saved_playlist_id, playlist_id, "保存的播放列表ID应该匹配")
+        self.assertGreater(len(saved_tracks), 0, "保存的播放列表应该包含歌曲")
+        
+        if len(saved_tracks) > 0:
+            first_track = saved_tracks[0]
+            print(f"         第一首歌: {first_track.get('name', 'N/A')} (ID: {first_track.get('id', 'N/A')})")
+            self.assertIn('name', first_track, "歌曲应该包含name字段")
+            self.assertIn('id', first_track, "歌曲应该包含id字段")
 
 def run_tests():
     """运行测试"""
