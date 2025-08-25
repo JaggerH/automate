@@ -150,11 +150,43 @@ class DebugAddon:
                         request_data['payload'] = json.loads(content)
                         request_data['payload_type'] = 'json'
                     except json.JSONDecodeError:
-                        # 保存原始字符串，可能是加密数据
-                        request_data['payload'] = content
-                        if content.startswith('params='):
-                            request_data['payload_type'] = 'encrypted_form'
+                        # 检查是否为加密数据并尝试解密
+                        if content.startswith('params=') and self.crypto:
+                            encrypted_hex = content[7:]  # 去掉'params='
+                            decrypt_result = self.crypto.eapi_decrypt(encrypted_hex)
+                            if decrypt_result.get('success'):
+                                try:
+                                    decrypted_data = decrypt_result.get('data')
+                                    if isinstance(decrypted_data, dict):
+                                        request_data['payload'] = decrypted_data
+                                        request_data['payload_type'] = 'decrypted_json'
+                                        request_data['payload_raw'] = content  # 保留原始加密数据
+                                    elif isinstance(decrypted_data, str):
+                                        # 尝试解析解密后的字符串为JSON
+                                        try:
+                                            parsed_data = json.loads(decrypted_data)
+                                            request_data['payload'] = parsed_data
+                                            request_data['payload_type'] = 'decrypted_json'
+                                            request_data['payload_raw'] = content
+                                        except json.JSONDecodeError:
+                                            request_data['payload'] = decrypted_data
+                                            request_data['payload_type'] = 'decrypted_string'
+                                            request_data['payload_raw'] = content
+                                    else:
+                                        request_data['payload'] = str(decrypted_data)
+                                        request_data['payload_type'] = 'decrypted_other'
+                                        request_data['payload_raw'] = content
+                                except Exception as e:
+                                    request_data['payload'] = content
+                                    request_data['payload_type'] = 'encrypted_form'
+                                    request_data['decrypt_error'] = str(e)
+                            else:
+                                request_data['payload'] = content
+                                request_data['payload_type'] = 'encrypted_form'
+                                request_data['decrypt_error'] = decrypt_result.get('error', 'Unknown')
                         else:
+                            # 保存原始字符串
+                            request_data['payload'] = content
                             request_data['payload_type'] = 'form_data'
                 except UnicodeDecodeError:
                     request_data['payload'] = "[二进制数据]"
@@ -194,35 +226,61 @@ class DebugAddon:
                         request_data['response']['content'] = content
                         request_data['response']['content_type'] = 'encrypted'
                 except UnicodeDecodeError:
-                    # 对于EAPI二进制响应，转换为hex字符串
+                    # 对于EAPI二进制响应，转换为hex字符串并尝试解密
                     if 'eapi' in flow.request.path.lower():
                         import binascii
                         hex_content = binascii.hexlify(flow.response.content).decode('ascii')
-                        request_data['response']['content'] = hex_content
-                        request_data['response']['content_type'] = 'eapi_hex'
                         print(f"📦 EAPI二进制响应已转换为hex (长度: {len(hex_content)})")
                         
-                        # 如果这是播放列表响应，尝试解密
-                        if flow.metadata.get('target_playlist_id') and self.crypto:
-                            playlist_id = flow.metadata['target_playlist_id']
-                            print(f"🔓 尝试解密播放列表 {playlist_id} 的响应...")
-                            
+                        # 尝试解密响应
+                        if self.crypto:
                             decrypt_result = self.crypto.eapi_decrypt(hex_content)
                             if decrypt_result.get('success'):
-                                # 解密成功，尝试解析JSON
                                 decrypted_data = decrypt_result.get('data')
                                 if isinstance(decrypted_data, str):
                                     try:
-                                        playlist_data = json.loads(decrypted_data)
-                                        if isinstance(playlist_data, dict) and 'playlist' in playlist_data:
-                                            playlist = playlist_data['playlist']
-                                            track_count = playlist.get('trackCount', 0)
-                                            playlist_name = playlist.get('name', 'N/A')
-                                            print(f"✅ 播放列表解密成功: {playlist_name} ({track_count}首歌)")
+                                        # 尝试解析为JSON
+                                        parsed_data = json.loads(decrypted_data)
+                                        request_data['response']['content'] = parsed_data
+                                        request_data['response']['content_type'] = 'decrypted_json'
+                                        request_data['response']['content_raw'] = hex_content  # 保留原始hex数据
+                                        
+                                        # 打印解密结果信息
+                                        if isinstance(parsed_data, dict):
+                                            if 'playlist' in parsed_data:
+                                                playlist = parsed_data['playlist']
+                                                track_count = playlist.get('trackCount', 0)
+                                                tracks_actual = len(playlist.get('tracks', []))
+                                                playlist_name = playlist.get('name', 'N/A')
+                                                print(f"✅ 播放列表解密成功: {playlist_name} (声称{track_count}首歌，实际tracks={tracks_actual})")
+                                            elif 'songs' in parsed_data:
+                                                songs = parsed_data['songs']
+                                                songs_count = len(songs) if isinstance(songs, list) else 0
+                                                print(f"✅ 歌曲详情解密成功: {songs_count}首歌曲")
+                                            elif 'code' in parsed_data:
+                                                print(f"✅ EAPI响应解密成功: code={parsed_data.get('code')}")
                                     except json.JSONDecodeError:
-                                        print(f"⚠️ 解密成功但JSON解析失败")
+                                        # 解密成功但不是JSON
+                                        request_data['response']['content'] = decrypted_data
+                                        request_data['response']['content_type'] = 'decrypted_string'
+                                        request_data['response']['content_raw'] = hex_content
+                                        print(f"✅ EAPI响应解密成功但非JSON格式")
+                                else:
+                                    # 解密成功但数据类型不是字符串
+                                    request_data['response']['content'] = str(decrypted_data)
+                                    request_data['response']['content_type'] = 'decrypted_other'
+                                    request_data['response']['content_raw'] = hex_content
+                                    print(f"✅ EAPI响应解密成功: {type(decrypted_data).__name__}")
                             else:
+                                # 解密失败，保留原始hex数据
+                                request_data['response']['content'] = hex_content
+                                request_data['response']['content_type'] = 'eapi_hex'
+                                request_data['response']['decrypt_error'] = decrypt_result.get('error', 'Unknown')
                                 print(f"❌ 响应解密失败: {decrypt_result.get('error', 'Unknown')}")
+                        else:
+                            # 没有解密工具，只保存hex
+                            request_data['response']['content'] = hex_content
+                            request_data['response']['content_type'] = 'eapi_hex'
                     else:
                         request_data['response']['content'] = "[二进制响应]"
                         request_data['response']['content_type'] = 'binary'

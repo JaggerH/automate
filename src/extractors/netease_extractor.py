@@ -38,6 +38,16 @@ class NeteaseExtractor(BaseExtractor):
         self.last_cookie_extract_by_user = {}  # 每个用户独立的提取时间
         self.cookie_interval = self.cookie_config.get('interval', 300)  # 默认5分钟
         
+        # songs数据临时存储（用于合并playlist和songs数据）
+        self.temp_songs_storage = {}
+        self._last_playlist_id = None  # 记录最近处理的playlist ID
+        
+        # 存储playlist的trackIds用于顺序匹配
+        self.playlist_track_ids = {}  # {playlist_id: [track_id1, track_id2, ...]}
+        
+        # 分步模式状态管理
+        self.pending_playlists = {}  # {playlist_id: playlist_response_data}
+        
         # 延迟导入NeteaseCrypto
         if self.playlist_config.get('enabled', False):
             try:
@@ -289,8 +299,12 @@ class NeteaseExtractor(BaseExtractor):
             raise
     
     def _is_playlist_eapi_request(self, path: str) -> bool:
-        """检查是否为播放列表EAPI请求"""
-        return '/eapi/' in path.lower() and 'playlist' in path.lower()
+        """检查是否为播放列表相关的EAPI请求"""
+        path_lower = path.lower()
+        return '/eapi/' in path_lower and (
+            'playlist' in path_lower or 
+            '/song/detail' in path_lower  # 歌曲详情API包含tracks数据
+        )
     
     def _extract_playlist_from_request(self, flow):
         """从请求中提取播放列表ID - 参考debug_ne_addon.py"""
@@ -305,11 +319,67 @@ class NeteaseExtractor(BaseExtractor):
                 
                 if result.get('success'):
                     data = result.get('data')
-                    if isinstance(data, dict) and 'id' in data:
-                        playlist_id = str(data['id'])
-                        if playlist_id in [str(pid) for pid in self.target_playlist_ids]:
-                            logger.info(f"检测到目标播放列表ID: {playlist_id}")
-                            flow.metadata['target_playlist_id'] = playlist_id
+                    if isinstance(data, dict):
+                        # 播放列表详情请求
+                        if 'id' in data:
+                            playlist_id = str(data['id'])
+                            if playlist_id in [str(pid) for pid in self.target_playlist_ids]:
+                                logger.info(f"检测到目标播放列表ID: {playlist_id}")
+                                flow.metadata['target_playlist_id'] = playlist_id
+                                # 记录最近的playlist_id用于关联songs请求
+                                self._last_playlist_id = playlist_id
+                        
+                        # 歌曲详情请求 - 从c字段中的id数组推断playlist
+                        elif 'c' in data:
+                            # 新的歌曲详情请求格式：c是JSON字符串 "[{\"id\": xxx}, {\"id\": yyy}, ...]"
+                            c_raw = data.get('c')
+                            try:
+                                # c字段是JSON字符串，需要先解析
+                                if isinstance(c_raw, str):
+                                    c_data = json.loads(c_raw)
+                                else:
+                                    c_data = c_raw if isinstance(c_raw, list) else []
+                                
+                                if isinstance(c_data, list) and len(c_data) > 0:
+                                    # 提取id数组
+                                    song_ids = []
+                                    for item in c_data:
+                                        if isinstance(item, dict) and 'id' in item:
+                                            song_id = item['id']
+                                            # ID可能是字符串，需要转换
+                                            if isinstance(song_id, str) and song_id.isdigit():
+                                                song_ids.append(int(song_id))
+                                            elif isinstance(song_id, int):
+                                                song_ids.append(song_id)
+                                
+                                    if song_ids:
+                                        logger.info(f"检测到歌曲详情请求，包含{len(song_ids)}首歌")
+                                        flow.metadata['is_songs_request'] = True
+                                        flow.metadata['song_ids'] = song_ids
+                                        
+                                        # 尝试匹配已保存的trackIds找到对应的playlist
+                                        matched_playlist_id = self._match_playlist_by_track_ids(song_ids)
+                                        if matched_playlist_id:
+                                            flow.metadata['target_playlist_id'] = matched_playlist_id
+                                            logger.info(f"根据ID顺序匹配到播放列表: {matched_playlist_id}")
+                                        else:
+                                            # 没有匹配的playlist，使用通用标记
+                                            flow.metadata['target_playlist_id'] = 'songs_batch'
+                                            logger.info(f"未找到匹配的播放列表，标记为songs批量请求")
+                                            
+                            except json.JSONDecodeError as e:
+                                logger.error(f"解析c字段JSON失败: {e}")
+                            except Exception as e:
+                                logger.error(f"处理c字段时出错: {e}")
+                        
+                        # 兼容旧格式的ids字段
+                        elif 'ids' in data:
+                            ids = data.get('ids', [])
+                            if isinstance(ids, list) and len(ids) > 0:
+                                logger.info(f"检测到旧格式歌曲详情请求，包含{len(ids)}首歌")
+                                flow.metadata['is_songs_request'] = True
+                                flow.metadata['song_ids'] = ids
+                                flow.metadata['target_playlist_id'] = 'songs_batch'
                             
         except (UnicodeDecodeError, KeyError) as e:
             logger.error(f"解密播放列表请求失败: {e}")
@@ -318,36 +388,232 @@ class NeteaseExtractor(BaseExtractor):
             raise
     
     def _extract_playlist_from_response(self, flow):
-        """从响应中提取播放列表数据 - 参考debug_ne_addon.py"""
-        if not self.crypto or not flow.response.content:
+        """从响应中提取播放列表数据 - 支持v4/v6两种模式"""
+        if not self._validate_response_conditions(flow):
             return None
         
         try:
-            # 将二进制响应转换为hex字符串
-            import binascii
-            hex_content = binascii.hexlify(flow.response.content).decode('ascii')
+            response_data = self._decrypt_response_content(flow.response.content)
+            if not response_data:
+                return None
             
-            # 解密响应
-            decrypt_result = self.crypto.eapi_decrypt(hex_content)
-            if decrypt_result.get('success'):
-                decrypted_data = decrypt_result.get('data')
-                if isinstance(decrypted_data, str):
-                    try:
-                        playlist_data = json.loads(decrypted_data)
-                        if isinstance(playlist_data, dict) and 'playlist' in playlist_data:
-                            playlist = playlist_data['playlist']
-                            logger.info(f"成功解密播放列表: {playlist.get('name', 'N/A')} ({playlist.get('trackCount', 0)}首歌)")
-                            return playlist_data
-                    except json.JSONDecodeError as e:
-                        logger.error(f"播放列表数据JSON解析失败: {e}")
-            else:
-                logger.error(f"播放列表响应解密失败: {decrypt_result.get('error', 'Unknown')}")
-                
+            # 分两种模式处理
+            if self._is_playlist_response(response_data):
+                return self._handle_playlist_response(response_data, flow)
+            elif self._is_songs_response(response_data):
+                return self._handle_songs_response(response_data, flow)
+            
+            return None
+            
         except Exception as e:
             logger.exception("处理播放列表响应失败")
             raise
+    
+    def _validate_response_conditions(self, flow) -> bool:
+        """验证响应处理的前置条件"""
+        return bool(self.crypto and flow.response.content)
+    
+    def _decrypt_response_content(self, response_content) -> Optional[dict]:
+        """解密响应内容并解析JSON"""
+        try:
+            import binascii
+            hex_content = binascii.hexlify(response_content).decode('ascii')
+            
+            decrypt_result = self.crypto.eapi_decrypt(hex_content)
+            if not decrypt_result.get('success'):
+                logger.error(f"响应解密失败: {decrypt_result.get('error', 'Unknown')}")
+                return None
+            
+            decrypted_data = decrypt_result.get('data')
+            if not isinstance(decrypted_data, str):
+                logger.error("解密数据格式错误：不是字符串")
+                return None
+            
+            return json.loads(decrypted_data)
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON解析失败: {e}")
+            return None
+    
+    def _is_playlist_response(self, response_data: dict) -> bool:
+        """检查是否为播放列表响应"""
+        return isinstance(response_data, dict) and 'playlist' in response_data
+    
+    def _is_songs_response(self, response_data: dict) -> bool:
+        """检查是否为歌曲详情响应"""
+        return (isinstance(response_data, dict) and 
+                'songs' in response_data and 
+                isinstance(response_data.get('songs'), list) and 
+                len(response_data.get('songs', [])) > 0)
+    
+    def _handle_playlist_response(self, response_data: dict, flow) -> dict:
+        """处理播放列表响应 - 自动判断v4/v6模式"""
+        playlist = response_data['playlist']
+        playlist_id = str(playlist.get('id', ''))
+        tracks = playlist.get('tracks', [])
+        track_ids = playlist.get('trackIds', [])
         
-        return None
+        print(f"[PLAYLIST] 检测到播放列表响应: {playlist.get('name', 'N/A')} (ID: {playlist_id})")
+        
+        if self._is_complete_playlist(tracks):
+            # 模式1: v6完整模式 - 直接保存
+            return self._handle_complete_playlist(response_data, playlist_id)
+        else:
+            # 模式2: v4分步模式 - 保存trackIds等待songs
+            return self._handle_partial_playlist(response_data, playlist_id, track_ids)
+    
+    def _handle_songs_response(self, response_data: dict, flow) -> dict:
+        """处理歌曲响应 - 尝试匹配并合并到playlist"""
+        songs = response_data.get('songs', [])
+        song_ids = flow.metadata.get('song_ids', [])
+        
+        print(f"[SONGS] 检测到歌曲响应: {len(songs)}首歌曲")
+        
+        # 尝试找到匹配的playlist
+        matched_playlist_id = self._match_playlist_by_track_ids(song_ids)
+        
+        if matched_playlist_id:
+            print(f"[MATCH] 匹配到播放列表: {matched_playlist_id}")
+            return self._merge_songs_into_existing_playlist(matched_playlist_id, songs, response_data)
+        else:
+            print(f"[WARN] 未找到匹配的播放列表，songs数据暂存")
+            return self._store_unmatched_songs(songs, response_data)
+    
+    def _save_playlist_track_ids(self, playlist_id: str, track_ids: list):
+        """保存播放列表的trackIds用于后续匹配"""
+        extracted_ids = self._extract_track_ids(track_ids)
+        
+        if extracted_ids:
+            self.playlist_track_ids[playlist_id] = extracted_ids
+            logger.info(f"  保存播放列表 {playlist_id} 的trackIds: {len(extracted_ids)}个ID")
+            logger.debug(f"  trackIds前3个: {extracted_ids[:3]}")
+    
+    def _extract_track_ids(self, track_ids: list) -> list:
+        """从trackIds数组中提取实际的ID值"""
+        extracted_ids = []
+        
+        for track_id_item in track_ids:
+            if isinstance(track_id_item, dict) and 'id' in track_id_item:
+                extracted_ids.append(track_id_item['id'])
+            elif isinstance(track_id_item, (int, str)):
+                extracted_ids.append(int(track_id_item) if str(track_id_item).isdigit() else track_id_item)
+        
+        return extracted_ids
+    
+    # 模式1: 完整播放列表处理
+    def _is_complete_playlist(self, tracks: list) -> bool:
+        """判断是否为完整的播放列表(v6模式)"""
+        return isinstance(tracks, list) and len(tracks) > 0
+    
+    def _handle_complete_playlist(self, response_data: dict, playlist_id: str) -> dict:
+        """处理完整播放列表 - v6模式"""
+        playlist = response_data['playlist']
+        track_count = len(playlist.get('tracks', []))
+        
+        print(f"[V6] 完整模式: 播放列表包含{track_count}首完整歌曲，直接保存")
+        
+        # 直接保存完整数据
+        self._save_complete_playlist(response_data, playlist_id)
+        return response_data
+    
+    # 模式2: 分步播放列表处理  
+    def _handle_partial_playlist(self, response_data: dict, playlist_id: str, track_ids: list) -> dict:
+        """处理部分播放列表 - v4模式"""
+        extracted_ids = self._extract_track_ids(track_ids)
+        
+        if extracted_ids:
+            self.playlist_track_ids[playlist_id] = extracted_ids
+            self.pending_playlists[playlist_id] = response_data
+            print(f"[V4] 分步模式: 播放列表tracks为空，保存{len(extracted_ids)}个trackIds等待歌曲数据")
+            print(f"     等待匹配歌曲请求...")
+        
+        # 暂时不保存，等待songs数据合并
+        return response_data
+    
+    def _merge_songs_into_existing_playlist(self, playlist_id: str, songs: list, response_data: dict) -> dict:
+        """将songs数据合并到已有的playlist中"""
+        # 检查是否有对应的playlist数据等待合并
+        if playlist_id in self.pending_playlists:
+            playlist_data = self.pending_playlists[playlist_id]
+            
+            # 执行合并
+            merged_data = self._perform_playlist_songs_merge(playlist_data, songs)
+            
+            print(f"[MERGE] 合并成功: 播放列表{playlist_id}现在包含{len(songs)}首完整歌曲")
+            
+            # 保存合并后的完整数据
+            self._save_complete_playlist(merged_data, playlist_id)
+            
+            # 清理临时数据
+            del self.pending_playlists[playlist_id]
+            if playlist_id in self.playlist_track_ids:
+                del self.playlist_track_ids[playlist_id]
+                
+            return merged_data
+        else:
+            print(f"[WARN] 找到匹配但无等待的playlist数据，songs数据暂存")
+            return self._store_matched_songs(playlist_id, songs, response_data)
+    
+    def _store_unmatched_songs(self, songs: list, response_data: dict) -> dict:
+        """存储未匹配的songs数据"""
+        return {
+            'type': 'songs_data', 
+            'songs': songs, 
+            'privileges': response_data.get('privileges', [])
+        }
+    
+    def _store_matched_songs(self, playlist_id: str, songs: list, response_data: dict) -> dict:
+        """存储已匹配但无等待playlist的songs数据"""
+        # 可以存储到temp_songs_storage等待后续处理
+        self.temp_songs_storage[playlist_id] = {
+            'songs': songs,
+            'privileges': response_data.get('privileges', []),
+            'timestamp': time.time()
+        }
+        return {
+            'type': 'matched_songs_data',
+            'playlist_id': playlist_id,
+            'songs': songs, 
+            'privileges': response_data.get('privileges', [])
+        }
+    
+    # 数据合并核心逻辑
+    def _perform_playlist_songs_merge(self, playlist_data: dict, songs: list) -> dict:
+        """执行playlist和songs的数据合并"""
+        merged_data = playlist_data.copy()
+        
+        if 'playlist' in merged_data:
+            merged_data['playlist']['tracks'] = songs
+            merged_data['playlist']['trackCount'] = len(songs)
+            
+        return merged_data
+    
+    def _save_complete_playlist(self, playlist_data: dict, playlist_id: str):
+        """保存完整的播放列表数据"""
+        try:
+            output_dir = Path(self.playlist_config.get('output_dir', ''))
+            if not output_dir:
+                return
+            
+            output_file = output_dir / f"playlist_{playlist_id}.json"
+            
+            # 原子写入
+            import uuid
+            temp_suffix = f'.tmp_{uuid.uuid4().hex[:8]}'
+            temp_file = output_file.with_suffix(temp_suffix)
+            
+            with open(temp_file, 'w', encoding='utf-8') as f:
+                json.dump(playlist_data, f, ensure_ascii=False, indent=2)
+            
+            # Windows原子重命名
+            if output_file.exists():
+                output_file.unlink()
+            temp_file.rename(output_file)
+            
+            logger.info(f"播放列表已保存到: {output_file}")
+            
+        except Exception as e:
+            logger.error(f"保存播放列表文件失败: {e}")
     
     def _update_extract_time(self, cookie_data: dict):
         """更新指定用户的最后提取时间"""
@@ -409,11 +675,41 @@ class NeteaseExtractor(BaseExtractor):
             raise
     
     def _save_playlist_data(self, playlist_data: dict, playlist_id: str):
-        """保存播放列表数据 - 使用原子写入"""
+        """保存播放列表数据 - 使用原子写入，tracks为空时放弃保存"""
         try:
             output_dir = Path(self.playlist_config.get('output_dir', ''))
             if not output_dir:
                 return
+            
+            # 检查数据类型并验证
+            if playlist_data.get('type') == 'songs_data':
+                # 这是songs数据，暂存等待合并
+                songs_count = len(playlist_data.get('songs', []))
+                logger.info(f"获取到{songs_count}首歌曲数据，等待播放列表基本信息")
+                self._store_songs_data(playlist_id, playlist_data)
+                return
+            
+            # 这是播放列表基本数据，检查tracks
+            if 'playlist' in playlist_data:
+                playlist = playlist_data['playlist']
+                tracks = playlist.get('tracks', [])
+                
+                # 如果tracks为空，尝试合并已存储的songs数据
+                if not tracks or len(tracks) == 0:
+                    logger.warning(f"播放列表 {playlist_id} 的tracks为空，尝试合并songs数据")
+                    merged_data = self._merge_songs_into_playlist(playlist_data, playlist_id)
+                    if not merged_data:
+                        logger.warning(f"播放列表 {playlist_id} 无法获取完整tracks数据，放弃保存")
+                        return
+                    playlist_data = merged_data
+                    tracks = playlist_data['playlist'].get('tracks', [])
+                
+                # 最终验证：如果tracks仍然为空，放弃保存
+                if not tracks or len(tracks) == 0:
+                    logger.warning(f"播放列表 {playlist_id} tracks为空，放弃保存")
+                    return
+                
+                logger.info(f"播放列表 {playlist.get('name', 'N/A')} 包含 {len(tracks)} 首歌，准备保存")
             
             # 只保存一个文件，不带时间戳
             output_file = output_dir / f"playlist_{playlist_id}.json"
@@ -458,10 +754,110 @@ class NeteaseExtractor(BaseExtractor):
             # 清理缓存的时间戳
             self.last_cookie_extract_by_user.clear()
             
+            # 清理临时songs存储
+            if hasattr(self, 'temp_songs_storage'):
+                self.temp_songs_storage.clear()
+            
+            # 清理trackIds存储
+            if hasattr(self, 'playlist_track_ids'):
+                self.playlist_track_ids.clear()
+            
+            # 清理分步模式状态
+            if hasattr(self, 'pending_playlists'):
+                self.pending_playlists.clear()
+            
             logger.debug(f"{self.service_name} 提取器资源已清理")
             
         except Exception as e:
             logger.error(f"清理 {self.service_name} 提取器资源时出错: {e}")
+    
+    def _store_songs_data(self, playlist_id: str, songs_data: dict):
+        """临时存储songs数据"""
+        songs = songs_data.get('songs', [])
+        privileges = songs_data.get('privileges', [])
+        
+        # 如果是批量songs请求，为所有目标playlist都存储
+        if playlist_id == 'songs_batch':
+            for target_id in self.target_playlist_ids:
+                target_id_str = str(target_id)
+                self.temp_songs_storage[target_id_str] = {
+                    'songs': songs,
+                    'privileges': privileges,
+                    'timestamp': time.time(),
+                    'match_method': 'batch'
+                }
+                logger.info(f"已为播放列表 {target_id_str} 暂存 {len(songs)} 首歌曲数据（批量模式）")
+        else:
+            # 精确匹配的playlist存储
+            self.temp_songs_storage[playlist_id] = {
+                'songs': songs,
+                'privileges': privileges,
+                'timestamp': time.time(),
+                'match_method': 'track_id_order'
+            }
+            logger.info(f"已为播放列表 {playlist_id} 暂存 {len(songs)} 首歌曲数据（顺序匹配）")
+    
+    def _merge_songs_into_playlist(self, playlist_data: dict, playlist_id: str):
+        """将songs数据合并到playlist中"""
+        if playlist_id not in self.temp_songs_storage:
+            logger.warning(f"未找到播放列表 {playlist_id} 的songs数据")
+            return None
+        
+        stored_songs = self.temp_songs_storage[playlist_id]
+        songs = stored_songs.get('songs', [])
+        
+        if not songs:
+            logger.warning(f"播放列表 {playlist_id} 的存储songs数据为空")
+            return None
+        
+        # 合并数据
+        merged_data = playlist_data.copy()
+        if 'playlist' in merged_data:
+            merged_data['playlist']['tracks'] = songs
+            # 更新统计信息
+            merged_data['playlist']['trackCount'] = len(songs)
+            
+        # 清理临时存储
+        del self.temp_songs_storage[playlist_id]
+        logger.info(f"成功合并 {len(songs)} 首歌曲到播放列表 {playlist_id}")
+        
+        return merged_data
+    
+    def _match_playlist_by_track_ids(self, song_ids: list) -> str:
+        """根据歌曲ID顺序匹配播放列表"""
+        if not song_ids:
+            return None
+        
+        # 检查每个已保存的playlist的trackIds
+        for playlist_id, track_ids in self.playlist_track_ids.items():
+            # 放宽长度匹配条件：允许10%的差异（比如某些歌曲下架）
+            length_diff_rate = abs(len(track_ids) - len(song_ids)) / max(len(track_ids), len(song_ids), 1)
+            
+            if length_diff_rate <= 0.1:  # 允许10%的长度差异
+                # 长度相近，检查ID顺序匹配度
+                match_count = 0
+                min_length = min(len(track_ids), len(song_ids))
+                
+                for i in range(min_length):
+                    if i < len(track_ids) and i < len(song_ids):
+                        if track_ids[i] == song_ids[i]:
+                            match_count += 1
+                        else:
+                            # ID不匹配，记录位置用于调试
+                            logger.debug(f"位置{i}: trackId={track_ids[i]} != songId={song_ids[i]}")
+                
+                # 计算匹配率（基于较小的数组）
+                match_rate = match_count / min_length if min_length > 0 else 0
+                print(f"[MATCH] 播放列表 {playlist_id} 长度: {len(track_ids)} vs {len(song_ids)}, 匹配率: {match_rate:.2%} ({match_count}/{min_length})")
+                
+                # 如果匹配率很高（>85%），认为是同一个播放列表
+                if match_rate > 0.85:
+                    print(f"[MATCH] 找到高匹配度播放列表: {playlist_id} (匹配率: {match_rate:.2%})")
+                    return playlist_id
+            else:
+                print(f"[MATCH] 播放列表 {playlist_id} 长度差异过大: {len(track_ids)} vs {len(song_ids)} (差异率: {length_diff_rate:.1%})")
+        
+        return None
     
     def __del__(self):
         """析构函数，确保资源被清理"""
