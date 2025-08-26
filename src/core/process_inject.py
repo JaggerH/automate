@@ -177,6 +177,11 @@ class ProcessInject:
         if not extractor:
             return
         
+        # 设置服务信息到flow元数据，避免提取器重复检查
+        flow.metadata['identified_service'] = target_service
+        flow.metadata['service_config'] = self.services_config[target_service]
+        flow.metadata['csv_manager'] = self.csv_manager
+        
         # 委托给提取器处理
         try:
             extractor.handle_request(flow)
@@ -187,10 +192,13 @@ class ProcessInject:
     
     def response(self, flow):
         """处理HTTP响应"""
-        # 检查是否为目标服务域名
-        target_service = self._identify_service(flow.request.pretty_host)
+        # 使用已识别的服务信息（避免重复域名检查）
+        target_service = flow.metadata.get('identified_service')
         if not target_service:
-            return
+            # 兼容性：如果没有预设服务信息，进行域名检查
+            target_service = self._identify_service(flow.request.pretty_host)
+            if not target_service:
+                return
         
         # 获取对应的提取器
         extractor = self.extractors.get(target_service)

@@ -15,7 +15,7 @@ services:
       extract_cookie:
         enabled: true
         interval: 3600  # 1 Hour
-        output_file: "data/outputs/netease/cookie.json"
+        output_dir: "data/outputs/netease/cookies"
         format: "netease_auth"
       extract_playlist:
         enabled: true
@@ -34,7 +34,7 @@ services:
       extract_cookie:
         enabled: true
         interval: 7200  # 2小时
-        output_file: "data/outputs/quark/cookie.json"
+        output_dir: "data/outputs/quark/cookie.json"
         format: "standard"
     
   # 示例：可以轻松添加新服务

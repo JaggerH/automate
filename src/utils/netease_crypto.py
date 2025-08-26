@@ -8,6 +8,8 @@ from Crypto.Cipher import AES
 from Crypto.Util.Padding import unpad
 import binascii
 
+from mitmproxy.http import HTTPFlow
+
 class NeteaseCrypto:
     """网易云音乐加密解密工具类"""
     
@@ -26,89 +28,26 @@ class NeteaseCrypto:
         Returns:
             解密后的数据字典
         """
-        try:
-            # 十六进制转bytes
-            encrypted_data = binascii.unhexlify(encrypted_hex)
-            
-            # AES-ECB解密
-            cipher = AES.new(self.eapi_key, AES.MODE_ECB)
-            decrypted = cipher.decrypt(encrypted_data)
-            
-            # 去除PKCS7填充
-            unpadded = unpad(decrypted, 16)
-            
-            # 转为字符串
-            decrypted_text = unpadded.decode('utf-8')
-            
-            # 解析EAPI数据格式: url-36cd479b6b5-data-36cd479b6b5-md5
-            parts = decrypted_text.split('-36cd479b6b5-')
-            if len(parts) >= 3:
-                url = parts[0]
-                data = parts[1]
-                
-                # 尝试解析JSON数据
-                try:
-                    json_data = json.loads(data)
-                    return {
-                        'success': True,
-                        'url': url,
-                        'data': json_data,
-                        'raw_data': data
-                    }
-                except json.JSONDecodeError:
-                    return {
-                        'success': True,
-                        'url': url,
-                        'data': data,
-                        'raw_data': data
-                    }
-            else:
-                return {
-                    'success': True,
-                    'data': decrypted_text,
-                    'raw_data': decrypted_text
-                }
-                
-        except Exception as e:
-            return {
-                'success': False,
-                'error': str(e),
-                'raw_hex': encrypted_hex[:100] + '...' if len(encrypted_hex) > 100 else encrypted_hex
-            }
-    
-    def extract_playlist_id_from_decrypted(self, decrypted_result: dict) -> str:
-        """
-        从解密结果中提取播放列表ID
+        # 十六进制转bytes
+        encrypted_data = binascii.unhexlify(encrypted_hex)
         
-        Args:
-            decrypted_result: 解密结果字典
+        # AES-ECB解密
+        cipher = AES.new(self.eapi_key, AES.MODE_ECB)
+        decrypted = cipher.decrypt(encrypted_data)
+        
+        # 去除PKCS7填充
+        unpadded = unpad(decrypted, 16)
+        
+        # 转为字符串
+        decrypted_text = unpadded.decode('utf-8')
+        
+        # 解析EAPI数据格式: url-36cd479b6b5-data-36cd479b6b5-md5
+        parts = decrypted_text.split('-36cd479b6b5-')
+        if len(parts) == 1:
+            return json.loads(parts[0])
+        else:
+            raise ValueError("NeteaseCrypto.content has salt, undefined situation")
             
-        Returns:
-            播放列表ID或None
-        """
-        if not decrypted_result.get('success'):
-            return None
-            
-        data = decrypted_result.get('data')
-        
-        # 方法1: 从JSON数据中提取
-        if isinstance(data, dict):
-            if 'id' in data:
-                return str(data['id'])
-            if 'playlist' in data and isinstance(data['playlist'], dict):
-                return str(data['playlist'].get('id', ''))
-        
-        # 方法2: 从原始数据字符串中提取
-        raw_data = decrypted_result.get('raw_data', '')
-        if isinstance(raw_data, str):
-            import re
-            # 查找id字段
-            id_match = re.search(r'"id"\s*:\s*(\d+)', raw_data)
-            if id_match:
-                return id_match.group(1)
-        
-        return None
-    
     def decrypt_request_payload(self, payload: str) -> dict:
         """
         解密请求载荷 (params=xxx格式)
@@ -123,9 +62,9 @@ class NeteaseCrypto:
             encrypted_hex = payload[7:]  # 去掉'params='
             return self.eapi_decrypt(encrypted_hex)
         else:
-            return {'success': False, 'error': 'Invalid payload format'}
+            raise("netease request.content is not match the known pattern")
     
-    def decrypt_response_content(self, content: str) -> dict:
+    def decrypt_response_content(self, flow: HTTPFlow) -> dict:
         """
         解密响应内容
         
@@ -136,7 +75,12 @@ class NeteaseCrypto:
             解密结果
         """
         # 响应内容通常直接是十六进制加密数据
-        return self.eapi_decrypt(content)
+        if not flow.response:
+            raise ValueError("must use in response, flow does not have a attribute response")
+        if not flow.response.content:
+            raise ValueError("flow.response does not have a content attribute.")
+            
+        return self.eapi_decrypt(flow.response.content)
     
     def analyze_debug_data(self, debug_data: dict, target_playlist_ids: list) -> dict:
         """
