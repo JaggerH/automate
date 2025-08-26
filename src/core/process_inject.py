@@ -6,9 +6,15 @@ Process Injection Mode Extractor
 基于mitmproxy PID注入，提供Cookie和播放列表提取功能
 参考smart_proxy架构，专注于进程注入模式
 """
+import os
+if os.getenv("DEBUG_ATTACH", "0") == "1":
+    import debugpy
+    debugpy.listen(("0.0.0.0", 5678))
+    print("[process_inject] Waiting for debugger attach on port 5678...")
+    debugpy.wait_for_client()
+    print("[process_inject] Debugger attached.")
 import subprocess
 import sys
-import os
 import psutil
 import time
 import logging
@@ -44,6 +50,7 @@ class ProcessInject:
         
         # 检查是否为守护模式（通过环境变量）
         self.is_daemon_mode = os.environ.get('AUTOMATE_DAEMON_MODE') == 'true'
+        self.is_debug = os.getenv("DEBUG_ATTACH", "0") == "1"
     
     def load(self, loader):
         """mitmproxy加载时初始化"""
@@ -163,11 +170,30 @@ class ProcessInject:
         
         return all_pids
     
-    def request(self, flow):
-        """处理HTTP请求"""
-        self.request_count += 1
+    # def request(self, flow):
+    #     """处理HTTP请求"""
+    #     self.request_count += 1
         
-        # 检查是否为目标服务域名
+    #     # 检查是否为目标服务域名
+    #     target_service = self._identify_service(flow.request.pretty_host)
+    #     if not target_service:
+    #         return
+        
+    #     # 获取对应的提取器
+    #     extractor = self.extractors.get(target_service)
+    #     if not extractor:
+    #         return
+        
+    #     # 委托给提取器处理
+    #     try:
+    #         extractor.handle_request(flow)
+    #     except (AttributeError, KeyError) as e:
+    #         logger.error(f"处理请求时出错 ({target_service}): {e}")
+    #     except Exception as e:
+    #         logger.exception(f"处理请求时发生未知错误 ({target_service})")
+    
+    def response(self, flow):
+        """处理HTTP响应"""
         target_service = self._identify_service(flow.request.pretty_host)
         if not target_service:
             return
@@ -177,42 +203,9 @@ class ProcessInject:
         if not extractor:
             return
         
-        # 设置服务信息到flow元数据，避免提取器重复检查
-        flow.metadata['identified_service'] = target_service
-        flow.metadata['service_config'] = self.services_config[target_service]
-        flow.metadata['csv_manager'] = self.csv_manager
-        
         # 委托给提取器处理
         try:
-            extractor.handle_request(flow)
-        except (AttributeError, KeyError) as e:
-            logger.error(f"处理请求时出错 ({target_service}): {e}")
-        except Exception as e:
-            logger.exception(f"处理请求时发生未知错误 ({target_service})")
-    
-    def response(self, flow):
-        """处理HTTP响应"""
-        # 使用已识别的服务信息（避免重复域名检查）
-        target_service = flow.metadata.get('identified_service')
-        if not target_service:
-            # 兼容性：如果没有预设服务信息，进行域名检查
-            target_service = self._identify_service(flow.request.pretty_host)
-            if not target_service:
-                return
-        
-        # 获取对应的提取器
-        extractor = self.extractors.get(target_service)
-        if not extractor:
-            return
-        
-        # 委托给提取器处理
-        try:
-            result = extractor.handle_response(flow)
-            if result:
-                self.extract_count += 1
-                # 使用logger替代print
-                extract_type = result.get('type', '数据')
-                logger.info(f"成功提取 {target_service} {extract_type}")
+            extractor.handle_response(flow)
         except (AttributeError, KeyError) as e:
             logger.error(f"处理响应时出错 ({target_service}): {e}")
         except Exception as e:

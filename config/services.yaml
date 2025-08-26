@@ -48,3 +48,9 @@ services:
   #   extract_interval: 3600  # 1小时
   #   output_file: "data/outputs/bilibili_cookie.json"
   #   cookie_format: "standard"
+
+# Debug configuration
+# 开启这个的情况下会dump flow全部流量到output_dir下
+debug:
+  enable: true
+  output_dir: "data/debug"

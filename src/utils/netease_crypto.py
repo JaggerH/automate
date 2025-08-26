@@ -18,18 +18,19 @@ class NeteaseCrypto:
         self.preset_key = b'0CoJUm6Qyw8W8jud'  # WEAPI预设密钥
         self.iv = b'0102030405060708'  # 初始化向量
     
-    def eapi_decrypt(self, encrypted_hex: str) -> dict:
+    def eapi_decrypt(self, encrypted_hex: str|bytes) -> dict:
         """
         解密EAPI响应数据
         
         Args:
-            encrypted_hex: 十六进制加密字符串
+            encrypted_hex: 十六进制加密字符串 or binary hex
             
         Returns:
             解密后的数据字典
         """
-        # 十六进制转bytes
-        encrypted_data = binascii.unhexlify(encrypted_hex)
+        if isinstance(encrypted_hex, bytes):
+            encrypted_hex = binascii.hexlify(encrypted_hex).decode('ascii') # binary to hex
+        encrypted_data = binascii.unhexlify(encrypted_hex) # 十六进制转bytes
         
         # AES-ECB解密
         cipher = AES.new(self.eapi_key, AES.MODE_ECB)

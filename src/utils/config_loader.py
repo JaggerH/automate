@@ -80,8 +80,8 @@ class ConfigLoader:
         # 验证cookie提取配置
         if features.get('extract_cookie', {}).get('enabled'):
             cookie_config = features['extract_cookie']
-            if not cookie_config.get('output_file'):
-                raise ValueError(f"服务 {service_name} 启用了cookie提取但未指定output_file")
+            if not cookie_config.get('output_dir'):
+                raise ValueError(f"服务 {service_name} 启用了cookie提取但未指定output_dir")
             
             # 验证interval是数字且大于0
             interval = cookie_config.get('interval', 300)

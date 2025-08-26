@@ -18,6 +18,7 @@ import logging
 import signal
 from pathlib import Path
 from typing import List, Dict
+from datetime import datetime
 
 # Windows控制台编码设置
 if os.name == 'nt':
@@ -80,7 +81,7 @@ def signal_handler(signum, frame):
         monitor.stop()
     sys.exit(0)
 
-def start_process_injection():
+def start_process_injection(replay_file=None):
     """启动进程注入提取器"""
     project_root = Path(__file__).parent
     os.chdir(project_root)
@@ -88,41 +89,72 @@ def start_process_injection():
     print("Process Injection Extractor")
     print("=" * 60)
     
-    # 检测目标进程
-    found_processes = get_service_processes()
-    
-    if not found_processes:
-        print("未检测到任何目标进程")
-        print("支持的进程:")
-        print("  网易云音乐: cloudmusic.exe, CloudMusic.exe")
-        print("  夸克网盘: QuarkCloudDrive.exe, quark.exe")
-        print("\n请先启动相应的客户端程序")
-        return 1
-    
-    print("检测到以下进程:")
-    all_pids = []
-    for service, pids in found_processes.items():
-        print(f"  {service}: {pids}")
-        all_pids.extend(pids)
+    # 如果是replay模式
+    if replay_file:
+        print(f"回放模式: {replay_file}")
         
-        # 显示进程详情
-        for pid in pids:
-            try:
-                proc = psutil.Process(pid)
-                print(f"    PID {pid}: {proc.name()}")
-            except psutil.NoSuchProcess:
-                continue
-    
-    # 生成mitmproxy命令
-    pid_list = ','.join(map(str, all_pids))
-    
-    cmd = [
-        "mitmdump",
-        "-s", "src/core/process_inject.py",
-        "--mode", f"local:{pid_list}",
-        "--set", "confdir=temp_certs",
-        "--quiet"  # 静默模式，不显示连接日志
-    ]
+        if not os.path.exists(replay_file):
+            print(f"错误: 回放文件不存在: {replay_file}")
+            return 1
+            
+        cmd = [
+            "mitmdump",
+            "-s", "src/core/process_inject.py",
+            "-r", replay_file,
+            "--set", "confdir=temp_certs",
+            "--quiet"
+        ]
+    else:
+        # 检测目标进程
+        found_processes = get_service_processes()
+        
+        if not found_processes:
+            print("未检测到任何目标进程")
+            print("支持的进程:")
+            print("  网易云音乐: cloudmusic.exe, CloudMusic.exe")
+            print("  夸克网盘: QuarkCloudDrive.exe, quark.exe")
+            print("\n请先启动相应的客户端程序")
+            return 1
+        
+        print("检测到以下进程:")
+        all_pids = []
+        for service, pids in found_processes.items():
+            print(f"  {service}: {pids}")
+            all_pids.extend(pids)
+            
+            # 显示进程详情
+            for pid in pids:
+                try:
+                    proc = psutil.Process(pid)
+                    print(f"    PID {pid}: {proc.name()}")
+                except psutil.NoSuchProcess:
+                    continue
+        
+        # 生成mitmproxy命令
+        pid_list = ','.join(map(str, all_pids))
+        
+        # 检查debug配置并添加输出文件
+        services_config = config_loader.get_services_config()
+        debug_config = services_config.get('debug', {})
+        cmd = [
+            "mitmdump",
+            "-s", "src/core/process_inject.py",
+            "--mode", f"local:{pid_list}",
+            "--set", "confdir=temp_certs",
+            "--quiet"  # 静默模式，不显示连接日志
+        ]
+        
+        if debug_config.get('enable', False):
+            # 创建debug目录
+            debug_dir = Path(debug_config.get('output_dir', 'data/debug'))
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            
+            # 生成时间戳文件名
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            outfile = debug_dir / f"{timestamp}.flows"
+            
+            cmd.extend(["-w", str(outfile)])
+            print(f"调试模式已启用，流量将保存到: {outfile}")
     
     print(f"\n启动进程注入提取器")
     print(f"命令: {' '.join(cmd)}")
@@ -276,6 +308,7 @@ def main():
   python main.py              启动进程注入提取器（一次性模式）
   python main.py --daemon     启动守护模式，持续监控进程
   python main.py --daemon --silent   静默守护模式
+  python main.py --replay flows.dump  回放流量文件进行分析
   python main.py --status     查看状态信息
   python main.py --cleanup    清理7天前的旧数据
         """
@@ -306,6 +339,12 @@ def main():
     )
     
     parser.add_argument(
+        '--replay',
+        type=str,
+        help='回放指定的流量文件进行调试分析'
+    )
+    
+    parser.add_argument(
         '--version',
         action='version',
         version='Automate v2.1.0 - Process Injection with Daemon Mode'
@@ -317,6 +356,11 @@ def main():
         show_status()
     elif args.cleanup:
         cleanup_data()
+    elif args.replay:
+        # 回放模式
+        if args.silent:
+            setup_logging(silent_mode=True)
+        sys.exit(start_process_injection(replay_file=args.replay))
     elif args.daemon:
         # 守护模式
         sys.exit(start_daemon_mode(silent_mode=args.silent))

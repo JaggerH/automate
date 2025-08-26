@@ -7,6 +7,7 @@ Work Step
 5. if content include tracks and tracks length == 0, wait for songs, save json
 """
 from typing import Dict, Optional, List, Union
+import os
 import json
 import time
 import logging
@@ -15,7 +16,7 @@ from pathlib import Path
 from .base_extractor import BaseExtractor
 from src.utils.netease_crypto import NeteaseCrypto
 from mitmproxy.http import HTTPFlow
-
+import sqlite3
 logger = logging.getLogger(__name__)
 
 class PlaylistState:
@@ -38,7 +39,7 @@ class PlaylistState:
         merged_data = self.try_merge_recent_data()
         if merged_data:
             logger.info("[TIME_WINDOW] 成功合并播放列表和歌曲数据")
-            return True, merged_data
+            return True, merged_data["playlist"]
         else:
             logger.info("[TIME_WINDOW] 暂存播放列表数据，等待歌曲数据")
             return False, None
@@ -134,11 +135,130 @@ class PlaylistState:
         
         if 'playlist' in merged_data and 'songs' in songs_data:
             songs = songs_data['songs']
-            merged_data['playlist']['tracks'] = copy.deepcopy(songs)  # 深拷贝歌曲数据
-            merged_data['playlist']['trackCount'] = len(songs)
-            logger.info(f"成功合并播放列表数据，包含{len(songs)}首歌曲")
+            track_ids = merged_data['playlist'].get('trackIds', [])
+            
+            # 对比trackIds和songs的长度
+            track_ids_count = len(track_ids)
+            songs_count = len(songs)
+            
+            logger.info(f"播放列表trackIds数量: {track_ids_count}, songs数量: {songs_count}")
+            
+            if track_ids_count != songs_count:
+                logger.warning(f"trackIds和songs数量不一致! trackIds: {track_ids_count}, songs: {songs_count}")
+                
+                # 找出缺失的track id
+                existing_song_ids = {song.get('id') for song in songs if song.get('id')}
+                missing_track_ids = []
+                
+                for track_item in track_ids:
+                    track_id = track_item.get('id') if isinstance(track_item, dict) else track_item
+                    if track_id not in existing_song_ids:
+                        missing_track_ids.append(track_id)
+                
+                if missing_track_ids:
+                    logger.info(f"发现 {len(missing_track_ids)} 首缺失的歌曲: {missing_track_ids[:5]}{'...' if len(missing_track_ids) > 5 else ''}")
+                    
+                    # 尝试从本地数据库补足缺失的歌曲信息
+                    missing_songs = self._fetch_missing_songs_from_db(missing_track_ids)
+                    if missing_songs:
+                        songs.extend(missing_songs)
+                        logger.info(f"从本地数据库成功补足 {len(missing_songs)} 首歌曲信息")
+                
+                # 按trackIds的顺序重新排序songs
+                ordered_songs = self._reorder_songs_by_track_ids(track_ids, songs)
+                merged_data['playlist']['tracks'] = copy.deepcopy(ordered_songs)
+            else:
+                merged_data['playlist']['tracks'] = copy.deepcopy(songs)
+            
+            merged_data['playlist']['trackCount'] = len(merged_data['playlist']['tracks'])
+            logger.info(f"成功合并播放列表数据，最终包含{len(merged_data['playlist']['tracks'])}首歌曲")
         
         return merged_data
+    
+    def _fetch_missing_songs_from_db(self, missing_track_ids: list) -> list:
+        """从本地数据库获取缺失的歌曲信息"""
+        if not missing_track_ids:
+            return []
+            
+        # 获取NetEase云音乐数据库路径
+        local_appdata = os.environ.get('LOCALAPPDATA')
+        if not local_appdata:
+            logger.warning("无法获取LOCALAPPDATA环境变量，无法访问本地数据库")
+            return []
+        
+        db_path = Path(local_appdata) / "NetEase" / "CloudMusic" / "Library" / "webdb.dat"
+        if not db_path.exists():
+            logger.warning(f"本地数据库文件不存在: {db_path}")
+            return []
+        
+        conn = None
+        try:
+            # 转换track_ids为int类型
+            int_track_ids = [int(track_id) for track_id in missing_track_ids]
+            missing_songs = []
+            conn = sqlite3.connect(str(db_path))
+            cursor = conn.cursor()
+            
+            # 构建IN查询的占位符
+            placeholders = ','.join('?' * len(int_track_ids))
+            
+            # 批量查询dbTrack表
+            query = f"SELECT id, jsonStr FROM dbTrack WHERE id IN ({placeholders})"
+            cursor.execute(query, int_track_ids)
+            db_track_results = cursor.fetchall()
+            
+            found_ids = set()
+            for row in db_track_results:
+                try:
+                    track_id, json_str = row
+                    if json_str:
+                        track_detail = json.loads(json_str)
+                        # 确保id为整数类型
+                        track_detail['id'] = int(track_id)
+                        missing_songs.append(track_detail)
+                        found_ids.add(int(track_id))
+                        logger.debug(f"从dbTrack找到歌曲: {track_detail.get('name', 'Unknown')} (ID: {track_id})")
+                except json.JSONDecodeError:
+                    logger.debug(f"歌曲 {row[0]} JSON解析失败")
+                except Exception as e:
+                    logger.debug(f"处理歌曲 {row[0]} 时出错: {e}")
+            
+            # 统计查找结果
+            not_found_ids = [tid for tid in int_track_ids if tid not in found_ids]
+            if not_found_ids:
+                logger.debug(f"以下歌曲在本地数据库中未找到: {not_found_ids[:10]}{'...' if len(not_found_ids) > 10 else ''}")
+            
+            logger.info(f"从本地数据库成功找到 {len(missing_songs)}/{len(int_track_ids)} 首歌曲")
+            return missing_songs
+            
+        except Exception as e:
+            logger.error(f"从本地数据库获取歌曲信息时出错: {e}")
+            return []
+        finally:
+            if conn is not None: conn.close()
+    
+    def _reorder_songs_by_track_ids(self, track_ids: list, songs: list) -> list:
+        """按trackIds的顺序重新排序songs"""
+        try:
+            # 创建歌曲ID到歌曲对象的映射
+            song_dict = {song.get('id'): song for song in songs if song.get('id')}
+            
+            # 按trackIds顺序构建有序的歌曲列表
+            ordered_songs = []
+            for track_item in track_ids:
+                track_id = track_item.get('id') if isinstance(track_item, dict) else track_item
+                
+                if track_id in song_dict:
+                    ordered_songs.append(song_dict[track_id])
+                else:
+                    logger.debug(f"歌曲 {track_id} 在songs中未找到，跳过")
+            
+            logger.info(f"按trackIds顺序重新排序，得到 {len(ordered_songs)} 首歌曲")
+            return ordered_songs
+            
+        except Exception as e:
+            logger.error(f"重新排序歌曲时出错: {e}")
+            return songs  # 出错时返回原始songs列表
     
 class FileManager:
     """文件操作管理器"""
@@ -269,7 +389,7 @@ class NeteaseExtractor(BaseExtractor):
         useid = 'DEFAULT'  # 以后可以获取userid来支持多用户提取
         last_extract_time = self.user_extract_times.get(useid)
         now = time.time()
-        if (last_extract_time is None) or (now - last_extract_time > self.interval):
+        if (last_extract_time is None) or (now - last_extract_time > self.cookie_interval):
             if self.is_valid_cookie(flow):
                 self.save_cookie(flow)
                 self.user_extract_times[useid] = now
@@ -333,7 +453,7 @@ class NeteaseExtractor(BaseExtractor):
         """保存播放列表文件"""
         output_dir = self.playlist_config.get('output_dir')
         try:
-            playlist_id = playlist_data["playlist"]["id"]
+            playlist_id = playlist_data["id"]
             output_file = Path(output_dir) / f"playlist_{playlist_id}.json"
             
             if FileManager.atomic_write_json(output_file, playlist_data):

@@ -4,8 +4,28 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is "Automate" - an intelligent proxy service for automatic cookie extraction from web services like NetEase Cloud Music and Quark Cloud Storage. It operates as a chain proxy that can integrate with upstream proxies like Clash, intercepting HTTP traffic to extract authentication cookies automatically.
+This is "Automate" - a process injection-based extractor for automatic cookie and data extraction from web services like NetEase Cloud Music and Quark Cloud Storage. It uses mitmproxy's process injection capabilities to intercept HTTP traffic from target applications and extract authentication cookies automatically.
 
+## Rules
+
+Before creating or modifying a function, first clarify:
+
+Objective – what the function is supposed to achieve.
+
+Inputs and outputs – the expected parameters and return values.
+
+Based on the file path, for example:
+```
+src/extractors/base_extractor.py
+```
+the corresponding test file should be:
+```
+src/tests/extractors/base_extractor.py
+```
+Generate unit test cases for the function to be modified. The test functions should be named as:
+```
+test_<function_name>
+```
 ## Common Commands
 
 ### Environment Setup
@@ -17,12 +37,12 @@ conda activate automate
 # Or install with pip
 pip install -r requirements.txt
 
-# Install HTTPS-specific dependencies (Windows)
-install_https_deps.bat
 ```
 
 ### Running the Application
 ```bash
+conda activate automate
+
 # Start process injection (one-time mode)
 python main.py
 
@@ -38,52 +58,42 @@ python main.py --status
 # Clean up old session data (>7 days)
 python main.py --cleanup
 
-# Windows batch file helpers
-start_daemon.bat          # Start daemon mode with UI
-start_daemon_silent.bat   # Start daemon mode silently
-
-# Debug mode with verbose cookie logging
-start_debug.bat
-# Or directly: python debug_proxy.py
-
-# Run with UTF-8 encoding (Windows helper)
-run_utf8.bat python main.py
 ```
 
 ### Development & Testing
 ```bash
-# Test proxy functionality
-python test_proxy.py
+# Reproduce flows from debug data
+python -m src.utils.flow_reproducer "data\debug"
 
-# Test specific genius proxy features
-python start_genius_proxy.py
+# Run specific tests (using unittest module)
+python -m unittest tests.extractors.test_netease_playlist_extractor -v
+
+# For conda environment testing
+call conda activate automate
+C:/Users/Jagger/anaconda3/envs/automate/python.exe -m unittest tests.extractors.test_netease_playlist_extractor -v
 ```
 
 ## Architecture Overview
 
 ### Core Components
 
-**Smart Chain Proxy (`src/core/smart_proxy.py`)**
-- Main mitmproxy addon that handles HTTP traffic interception
-- Manages upstream proxy detection and routing
-- Coordinates cookie extraction across different services
-- Implements selective filtering - only processes configured domains
-
-**Upstream Detection (`src/core/upstream_detector.py`)**
-- Auto-detects running Clash or other proxy services
-- Implements fallback to direct connection if upstream unavailable
-- Supports multiple upstream ports and protocols (HTTP/SOCKS5)
+**Process Injection System (`src/core/process_inject.py`)**
+- Main mitmproxy addon that handles process injection mode
+- Detects target processes (cloudmusic.exe, QuarkCloudDrive.exe) using psutil
+- Routes traffic to appropriate extractors based on domain matching
+- Supports both daemon and one-time execution modes
 
 **Extractors Framework (`src/extractors/`)**
 - `BaseExtractor`: Abstract base class for service-specific cookie extractors
-- `NeteaseExtractor`: NetEase Cloud Music cookie extraction logic
-- `QuarkExtractor`: Quark Cloud Storage cookie extraction logic
+- `QuarkExtractor`: Quark Cloud Storage cookie extraction logic  
 - Each extractor handles domain-specific cookie formats and timing constraints
+- Extractors process both request and response phases
 
 **Configuration System**
-- `config/proxy_config.yaml`: Proxy settings, upstream detection, performance tuning
-- `config/services.yaml`: Service definitions, domains, extraction intervals, output paths
+- `config/services.yaml`: Service definitions, domains, extraction intervals, output paths, and feature toggles
 - `src/utils/config_loader.py`: Centralized configuration management with hot reload
+- `config/logging.yaml`: Logging configuration (if exists)
+- Configuration supports per-service process name mapping and feature flags
 
 **Data Management (`src/core/csv_manager.py`)**
 - Tracks extraction status and timestamps per service
@@ -91,13 +101,17 @@ python start_genius_proxy.py
 - Implements time-based extraction control (prevents excessive extraction)
 - Stores data in `data/extraction_status.csv` and `data/proxy_sessions.csv`
 
-### Traffic Flow
+### Process Injection Flow
 ```
-[Client App] → [Automate:8080] → [Upstream Proxy:7897] → [Target Server]
-                     ↓                    ↓
-               Cookie Extraction    Rule-based Routing
-                     ↓
-             Save to JSON files
+[Target Process] → [mitmproxy PID injection] → [ProcessInject Addon]
+                              ↓
+                    [Domain-based Routing]
+                              ↓
+                  [Service-specific Extractors]
+                              ↓
+                    [Cookie & Data Extraction]
+                              ↓
+                      [Save to JSON files]
 ```
 
 ### Key Features
@@ -106,9 +120,9 @@ python start_genius_proxy.py
 
 **Time-Based Extraction**: Prevents excessive cookie extraction using configurable intervals (e.g., every 5 minutes for NetEase).
 
-**Chain Proxy Integration**: Automatically detects and chains with Clash or other upstream proxies for seamless integration with existing proxy setups.
+**Process Detection**: Automatically detects target processes using psutil and supports daemon mode for continuous monitoring.
 
-**Output Compatibility**: NetEase cookies saved in `../music-sync/config/auto_cookie.json` format for integration with music-sync project.
+**Output Compatibility**: NetEase cookies saved in `data/outputs/netease/cookies/` directory with structured JSON format.
 
 ## Configuration
 
@@ -120,24 +134,25 @@ python start_genius_proxy.py
 - Cookie extraction intervals
 - Output file paths and formats
 
-**`config/proxy_config.yaml`**: Proxy behavior settings
-- Listen ports (8080 with fallbacks 8081-8083)
-- Upstream proxy detection ports (7897-7899)
-- Performance tuning (timeouts, concurrency)
-- SSL certificate handling
+**`config/logging.yaml`**: Logging configuration (if exists)
+- Log levels and formats for different components
+- Console and file output settings
 
 ### Output Files Structure
-- **NetEase**: `../music-sync/config/auto_cookie.json` (music-sync compatible format)
-- **Quark**: `data/outputs/quark_cookie.json` (standard format)
+- **NetEase Cookies**: `data/outputs/netease/cookie.json` (standard format)
+- **NetEase Playlists**: `data/outputs/netease/playlists/` (JSON files per playlist)
+- **Quark**: `data/outputs/quark/cookie.json` (standard format)
 - **Status**: `data/extraction_status.csv` (service status tracking)
 - **Sessions**: `data/proxy_sessions.csv` (proxy session logs)
+- **Debug Data**: `data/debug/` (request/response captures for troubleshooting)
 
 ## Adding New Services
 
 1. Create new extractor in `src/extractors/` inheriting from `BaseExtractor`
-2. Implement `extract_from_request()` and `extract_from_response()` methods
-3. Add service configuration in `config/services.yaml`
-4. Register extractor in `SmartChainProxy._init_extractors()` method
+2. Implement `handle_request()` and `handle_response()` methods
+3. Add service configuration in `config/services.yaml` with domains and features
+4. Register extractor in `ProcessInject._init_extractors()` method
+5. Add process name mapping in service config if needed
 
 ## Windows-Specific Notes
 
@@ -149,6 +164,22 @@ python start_genius_proxy.py
 ## Development Environment
 
 - Python 3.8+ required (configured for 3.11 in environment.yaml)
-- Primary dependency: mitmproxy 10.2.2 for HTTP interception
-- Windows-optimized with batch file launchers
-- No traditional test framework - uses direct execution scripts for testing
+- Primary dependency: mitmproxy 10.2.2 for HTTP interception and process injection
+- Windows-optimized with proper UTF-8 encoding support
+- Testing uses unittest module and flow reproduction utilities
+- Debug data capture in `data/debug/` for flow analysis and reproduction
+
+## Flow Reproduction for Debugging
+
+The project includes a flow reproduction system for debugging extraction issues:
+
+```bash
+# Reproduce specific flows from debug data
+python -m src.utils.flow_reproducer "data\debug"
+```
+
+**Flow Reproducer (`src/utils/flow_reproducer.py`)**
+- Recreates HTTPFlow objects from captured JSON debug data
+- Allows testing extraction logic without running live traffic
+- Useful for debugging specific request/response patterns
+- Supports batch processing of debug files
