@@ -194,17 +194,16 @@ class PlaylistState:
         conn = None
         try:
             # 转换track_ids为int类型
-            int_track_ids = [int(track_id) for track_id in missing_track_ids]
             missing_songs = []
             conn = sqlite3.connect(str(db_path))
             cursor = conn.cursor()
             
             # 构建IN查询的占位符
-            placeholders = ','.join('?' * len(int_track_ids))
+            placeholders = ','.join('?' * len(missing_track_ids))
             
             # 批量查询dbTrack表
             query = f"SELECT id, jsonStr FROM dbTrack WHERE id IN ({placeholders})"
-            cursor.execute(query, int_track_ids)
+            cursor.execute(query, missing_track_ids)
             db_track_results = cursor.fetchall()
             
             found_ids = set()
@@ -213,8 +212,8 @@ class PlaylistState:
                     track_id, json_str = row
                     if json_str:
                         track_detail = json.loads(json_str)
-                        # 确保id为整数类型
-                        track_detail['id'] = int(track_id)
+                        # 转换字段格式以匹配API响应格式
+                        self._transform_track_fields(track_detail)
                         missing_songs.append(track_detail)
                         found_ids.add(int(track_id))
                         logger.debug(f"从dbTrack找到歌曲: {track_detail.get('name', 'Unknown')} (ID: {track_id})")
@@ -224,11 +223,11 @@ class PlaylistState:
                     logger.debug(f"处理歌曲 {row[0]} 时出错: {e}")
             
             # 统计查找结果
-            not_found_ids = [tid for tid in int_track_ids if tid not in found_ids]
+            not_found_ids = [tid for tid in missing_track_ids if tid not in found_ids]
             if not_found_ids:
                 logger.debug(f"以下歌曲在本地数据库中未找到: {not_found_ids[:10]}{'...' if len(not_found_ids) > 10 else ''}")
             
-            logger.info(f"从本地数据库成功找到 {len(missing_songs)}/{len(int_track_ids)} 首歌曲")
+            logger.info(f"从本地数据库成功找到 {len(missing_songs)}/{len(missing_track_ids)} 首歌曲")
             return missing_songs
             
         except Exception as e:
@@ -236,6 +235,35 @@ class PlaylistState:
             return []
         finally:
             if conn is not None: conn.close()
+    
+    def _transform_track_fields(self, track_detail: dict) -> None:
+        """转换数据库中的字段格式以匹配API响应格式"""
+        try:
+            if 'id' in track_detail:
+                track_detail['id'] = int(track_detail['id'])
+            # 转换 album -> al
+            if 'album' in track_detail:
+                track_detail['al'] = track_detail.pop('album')
+                # 确保 al.id 为整数类型
+                if isinstance(track_detail['al'], dict) and 'id' in track_detail['al']:
+                    track_detail['al']['id'] = int(track_detail['al']['id'])
+            
+            # 转换 artists -> ar
+            if 'artists' in track_detail:
+                track_detail['ar'] = track_detail.pop('artists')
+                # 确保 ar 中每个元素的 id 为整数类型
+                if isinstance(track_detail['ar'], list):
+                    for artist in track_detail['ar']:
+                        if isinstance(artist, dict) and 'id' in artist:
+                            artist['id'] = int(artist['id'])
+            
+            if 'commentThreadId' in track_detail:
+                track_detail.pop('commentThreadId')
+            
+            if 'privilege' in track_detail:
+                track_detail.pop('privilege')
+        except Exception as e:
+            logger.debug(f"转换歌曲字段时出错: {e}")
     
     def _reorder_songs_by_track_ids(self, track_ids: list, songs: list) -> list:
         """按trackIds的顺序重新排序songs"""
@@ -423,7 +451,6 @@ class NeteaseExtractor(BaseExtractor):
         return ('/eapi/' in path_lower and 
                 any(playlist_path in path_lower for playlist_path in self.PLAYLIST_PATHS))
         
-    
     def extract_playlist(self, flow: HTTPFlow):
         """处理播放列表响应"""
         content = self.decoder.decrypt_response_content(flow)
@@ -433,6 +460,12 @@ class NeteaseExtractor(BaseExtractor):
             playlist_id = str(playlist.get('id', ''))
             tracks = playlist.get('tracks', [])
             logger.info(f"[PLAYLIST] 检测到播放列表响应: {playlist.get('name', 'N/A')} (ID: {playlist_id})")
+            
+            # 检查播放列表ID是否在目标列表中
+            if playlist_id not in self.target_playlist_ids:
+                logger.info(f"[FILTER] 跳过播放列表 {playlist_id}，不在目标列表中")
+                return
+            
             if tracks:
                 # 完整数据，直接保存
                 logger.info(f"[V6] 完整模式: 播放列表包含{len(tracks)}首歌曲，直接保存")
