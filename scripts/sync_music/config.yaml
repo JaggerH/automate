@@ -9,13 +9,13 @@
 # 支持环境变量，如 $HOME/Music 或 %USERPROFILE%\Music
 # 可以是单个目录（字符串）或多个目录（列表）
 user_dir: 
-  - Z:\网易音乐源文件
-  - Z:\网易音乐已解锁
+  - "\\\\TARS\\Music\\网易音乐源文件"
+  - "\\\\TARS\\Music\\网易音乐已解锁"
 # 或者使用单个目录：
 # user_dir: ~/Music
 
 # 输入音乐目录：存放待处理音乐文件的目录（格式：id-bitrate-hash.mp3）
-input_dir: C:\Users\Jagger\AppData\Local\NetEase\CloudMusic\Cache\Cache
+input_dir: "%LOCALAPPDATA%\\NetEase\\CloudMusic\\Cache\\Cache"
 
 # 输出音乐目录：复制和重命名后的音乐文件存放目录
 output_dir: "\\\\TARS\\Music\\music_sync"
@@ -25,7 +25,7 @@ output_dir: "\\\\TARS\\Music\\music_sync"
 # =============================================================================
 
 # 单个播放列表JSON文件路径（可选，命令行参数优先）
-json_file: ./data/outputs/netease/playlists/playlist_9951570527.json
+json_file: ./data/outputs/netease/playlists/playlist_60567077.json
 
 # 包含多个JSON文件的目录路径
 # json_dir: ./playlists

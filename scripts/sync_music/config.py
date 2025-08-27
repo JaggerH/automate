@@ -93,6 +93,12 @@ class ConfigLoader:
         for key, value in config_data.items():
             if isinstance(value, str):
                 expanded[key] = os.path.expandvars(value)
+            elif isinstance(value, list):
+                # 处理列表中的字符串环境变量展开
+                expanded[key] = [
+                    os.path.expandvars(item) if isinstance(item, str) else item
+                    for item in value
+                ]
             elif isinstance(value, dict):
                 expanded[key] = ConfigLoader._expand_env_vars(value)
             else:

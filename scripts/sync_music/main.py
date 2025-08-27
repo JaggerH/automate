@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+from ast import Dict
 import json
 import os
 import sys
@@ -26,6 +27,46 @@ def load_playlist_json(file_path: str) -> Optional[dict]:
         print(f"错误: 读取文件失败 - {e}")
         return None
 
+def build_m3u_playlist(db_manager: DatabaseManager, playlist_data: Dict):
+    from .models import Playlist, Track, playlist_track_association
+    # ====== 新增: 生成 m3u 文件 ======
+    try:
+        # 数据库文件所在目录
+        db_path = db_manager.engine.url.database
+        base_dir = os.path.dirname(db_path)
+        playlist_dir = os.path.join(base_dir, "playlists")
+        playlist_name = playlist_data["name"]
+        os.makedirs(playlist_dir, exist_ok=True)
+
+        # 查询 playlist 的 tracks
+        with db_manager.get_session() as session:
+            playlist = session.query(Playlist).filter_by(
+                netease_id=playlist_data['id']
+            ).first()
+            if playlist:
+                tracks = (
+                    session.query(Track)
+                    .join(playlist_track_association,
+                            Track.id == playlist_track_association.c.track_id)
+                    .filter(playlist_track_association.c.playlist_id == playlist.id)
+                    .order_by(playlist_track_association.c.position)
+                    .all()
+                )
+
+                m3u_path = os.path.join(playlist_dir, f"{playlist_name}.m3u")
+                with open(m3u_path, "w", encoding="utf-8") as f:
+                    f.write("#EXTM3U\n")
+                    for track in tracks:
+                        if track.file_path:
+                            # 转换成相对路径，按你给的格式 ../网易音乐源文件/xxx.mp3
+                            rel_path = os.path.relpath(track.file_path, playlist_dir)
+                            f.write(rel_path.replace("\\", "/") + "\n")
+
+                print(f"已生成播放列表文件: {m3u_path}")
+
+    except Exception as e:
+        print(f"[警告] 生成 m3u 文件失败: {e}")
+        
 def sync_single_playlist(db_manager: DatabaseManager, json_file: str, 
                         config: SyncConfig) -> bool:
     """同步单个播放列表"""
@@ -42,6 +83,7 @@ def sync_single_playlist(db_manager: DatabaseManager, json_file: str,
     if success:
         playlist_name = playlist_data.get('name', '未知播放列表')
         track_count = playlist_data.get('trackCount', 0)
+        build_m3u_playlist(db_manager, playlist_data)
         print(f"[成功] 同步播放列表 '{playlist_name}' ({track_count} 首歌曲)")
     else:
         print(f"[失败] 同步播放列表失败: {json_file}")
