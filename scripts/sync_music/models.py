@@ -26,6 +26,7 @@ class Playlist(Base):
     create_time = Column(DateTime)
     update_time = Column(DateTime, default=datetime.now, onupdate=datetime.now)
     cover_img_url = Column(String)
+    track_ids_hash = Column(String)  # 用于频率控制
     
     tracks = relationship("Track", secondary=playlist_track_association, back_populates="playlists")
 

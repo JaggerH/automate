@@ -1,4 +1,5 @@
 import json
+import hashlib
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from sqlalchemy import create_engine, or_
@@ -16,6 +17,7 @@ class DatabaseManager:
         self.engine = create_engine(database_url, echo=False)
         Base.metadata.create_all(self.engine)
         self.SessionLocal = sessionmaker(bind=self.engine)
+        self.file_matcher: Optional[FileMatcher] = None
     
     @contextmanager
     def get_session(self) -> Session:
@@ -31,12 +33,31 @@ class DatabaseManager:
             session.close()
     
     def sync_playlist_from_json(self, json_data: Dict[str, Any], user_dir: str, 
-                               input_dir: str, output_dir: str) -> bool:
+                               input_dir: str, output_dir: str, 
+                               check_frequency: bool = True) -> bool:
         """从JSON数据同步播放列表到数据库"""
+        
+        # 初始化文件匹配器（带文件索引）
+        if not self.file_matcher:
+            self.file_matcher = FileMatcher(user_dir, input_dir, output_dir)
         
         try:
             with self.get_session() as session:
                 playlist_data = json_data
+                
+                # 频率控制：检查trackIds是否有变化
+                if check_frequency:
+                    existing_playlist = session.query(Playlist).filter_by(
+                        netease_id=playlist_data['id']
+                    ).first()
+                    
+                    if existing_playlist:
+                        current_track_ids = [track['id'] for track in playlist_data.get('tracks', [])]
+                        current_hash = self._calculate_track_ids_hash(current_track_ids)
+                        
+                        if existing_playlist.track_ids_hash == current_hash:
+                            print(f"播放列表 {playlist_data['id']} 的歌曲列表未变化，跳过同步")
+                            return True
                 
                 playlist = session.query(Playlist).filter_by(
                     netease_id=playlist_data['id']
@@ -66,6 +87,10 @@ class DatabaseManager:
                     playlist.track_count = playlist_data.get('trackCount', playlist.track_count)
                     playlist.cover_img_url = playlist_data.get('coverImgUrl', playlist.cover_img_url)
                 
+                # 更新trackIds hash
+                current_track_ids = [track['id'] for track in playlist_data.get('tracks', [])]
+                playlist.track_ids_hash = self._calculate_track_ids_hash(current_track_ids)
+                
                 existing_associations = session.query(playlist_track_association).filter_by(
                     playlist_id=playlist.id
                 ).all()
@@ -79,14 +104,102 @@ class DatabaseManager:
                 tracks_data = playlist_data.get('tracks', [])
                 
                 for position, track_data in enumerate(tracks_data):
-                    self._process_track(session, track_data, playlist, position, 
-                                     user_dir, input_dir, output_dir)
+                    self._process_track_with_matcher(session, track_data, playlist, position)
                 
                 return True
                 
         except Exception as e:
             print(f"Error syncing playlist: {e}")
             return False
+    
+    def _calculate_track_ids_hash(self, track_ids: List[int]) -> str:
+        """计算trackIds的hash值"""
+        track_ids_str = ','.join(map(str, sorted(track_ids)))
+        return hashlib.md5(track_ids_str.encode('utf-8')).hexdigest()
+    
+    def _process_track_with_matcher(self, session: Session, track_data: Dict[str, Any], 
+                                   playlist: Playlist, position: int):
+        """使用FileMatcher处理单个track（新的优化版本）"""
+        
+        track = session.query(Track).filter_by(netease_id=track_data['id']).first()
+        
+        artists = [artist['name'] for artist in track_data.get('ar', [])]
+        artist_names = ', '.join(artists)
+        
+        if not track:
+            track = Track(
+                netease_id=track_data['id'],
+                name=track_data.get('name', ''),
+                duration=track_data.get('duration', 0),
+                artist_names=artist_names
+            )
+            session.add(track)
+            session.flush()
+        else:
+            track.name = track_data.get('name', track.name)
+            track.duration = track_data.get('duration', track.duration)
+            track.artist_names = artist_names
+        
+        base_filename = FileMatcher.generate_filename(track_data)
+        
+        # 使用FileMatcher实例进行3个目录的查找
+        file_found = False
+        bitrate = None
+        file_hash = None
+        file_path = None
+        
+        # 优先级1&2: 按文件名查找（用户目录优先，输出目录次之）
+        file_result = self.file_matcher.find_file_by_filename(base_filename)
+        if file_result:
+            file_path, source_type = file_result
+            bitrate, file_hash = AudioInfoExtractor.get_audio_info(file_path)
+            file_found = True
+            
+            if source_type == 'user':
+                pass  # 静默处理用户目录文件
+            elif source_type == 'output':
+                try:
+                    track_name = track_data.get('name', 'Unknown')
+                    artist_names = ', '.join([a['name'] for a in track_data.get('ar', [])])
+                    print(f"已存在输出目录: {track_name} - {artist_names}")
+                except UnicodeEncodeError:
+                    print(f"已存在输出目录: Track ID {track_data['id']}")
+        
+        # 优先级3: 按track_id查找输入目录并复制
+        if not file_found:
+            input_result = self.file_matcher.find_file_by_track_id(track_data['id'])
+            if input_result:
+                source_file, extracted_bitrate, source_type = input_result
+                dest_file = FileMatcher.copy_and_rename_file(
+                    source_file, self.file_matcher.output_dir, base_filename, track_data
+                )
+                
+                bitrate, file_hash = AudioInfoExtractor.get_audio_info(dest_file)
+                file_path = dest_file
+                file_found = True
+                
+                # 更新输出目录索引
+                self.file_matcher.output_files_index[base_filename] = dest_file
+                
+                try:
+                    track_name = track_data.get('name', 'Unknown')
+                    artist_names = ', '.join([a['name'] for a in track_data.get('ar', [])])
+                    print(f"已从缓存解密: {track_name} - {artist_names}")
+                except UnicodeEncodeError:
+                    print(f"已从缓存解密: Track ID {track_data['id']}")
+        
+        track.bitrate = bitrate
+        track.file_hash = file_hash
+        track.file_path = file_path
+        track.file_exists = file_found
+        
+        session.execute(
+            playlist_track_association.insert().values(
+                playlist_id=playlist.id,
+                track_id=track.id,
+                position=position
+            )
+        )
     
     def _process_track(self, session: Session, track_data: Dict[str, Any], 
                       playlist: Playlist, position: int, user_dir: str, 
@@ -145,7 +258,7 @@ class DatabaseManager:
             input_file_result = FileMatcher.find_file_in_input_dir(input_dir, track_data['id'])
             if input_file_result:
                 source_file, extracted_bitrate = input_file_result
-                dest_file = FileMatcher.copy_and_rename_file(source_file, output_dir, base_filename)
+                dest_file = FileMatcher.copy_and_rename_file(source_file, output_dir, base_filename, track_data)
                 
                 bitrate, file_hash = AudioInfoExtractor.get_audio_info(dest_file)
                 file_path = dest_file
