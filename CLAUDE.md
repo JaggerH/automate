@@ -1,4 +1,9 @@
 # CLAUDE.md
+该项目下运行程序一定要使用conda环境automate.
+通过以下指令运行
+```
+conda activate automate
+```
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
